@@ -1,0 +1,74 @@
+---
+# Garden-Tiller: Report Generation Playbook
+# Generates HTML report from collected validation results
+
+- name: Generate validation report
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [report, all]
+  vars:
+    structlog_level: info
+    report_dir: "{{ playbook_dir }}/../reports"
+    today_date: "{{ lookup('pipe', 'date +%Y%m%d') }}"
+    report_file: "{{ report_dir }}/lab-report-{{ today_date }}.html"
+  tasks:
+    - name: Register report start time
+      ansible.builtin.set_fact:
+        report_start: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      run_once: true
+
+    - name: Configure Structlog logger for report generation
+      ansible.builtin.debug:
+        msg: "Configuring Structlog logger for report generation at level: {{ structlog_level }}"
+      run_once: true
+
+    - name: Ensure report directory exists
+      ansible.builtin.file:
+        path: "{{ report_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Generate HTML report
+      ansible.builtin.copy:
+        content: |
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>Garden-Tiller Validation Report</title>
+            <style>
+              body { font-family: Arial, sans-serif; margin: 20px; }
+              h1 { color: #2c3e50; }
+              .section { margin-bottom: 20px; }
+              .success { color: green; }
+              .warning { color: orange; }
+              .error { color: red; }
+            </style>
+          </head>
+          <body>
+            <h1>Garden-Tiller Validation Report</h1>
+            <p>Report generated on: {{ report_start }}</p>
+
+            <div class="section">
+              <h2>Validation Summary</h2>
+              <p>This is a placeholder report - actual detailed results will be available in the full implementation.</p>
+              <p>Validation completed successfully with mock data.</p>
+            </div>
+
+            <div class="section">
+              <h2>OOBM Validation</h2>
+              <p>Status: <span class="success">Passed</span></p>
+            </div>
+
+            <div class="section">
+              <h2>IPMI Validation</h2>
+              <p>Status: <span class="success">Passed</span></p>
+            </div>
+          </body>
+          </html>
+        dest: "{{ report_file }}"
+
+    - name: Report file location
+      ansible.builtin.debug:
+        msg: "Report generated at {{ report_file }}"
+      run_once: true

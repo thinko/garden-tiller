@@ -1,0 +1,141 @@
+---
+# Garden-Tiller: MAC Address Validation Playbook
+# Discovers all host interfaces and MAC addresses and adds them to host inventory
+
+- name: Discover and validate MAC addresses on each interface
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [mac, all]
+  vars:
+    structlog_level: info
+  tasks:
+    - name: Register validation start
+      ansible.builtin.set_fact:
+        mac_validation_start: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      run_once: true
+
+    - name: Set up result dictionary for MAC validation
+      ansible.builtin.set_fact:
+        mac_results: "{{ mac_results | default({}) if mac_results is mapping else {} }}"
+      run_once: true
+
+    - name: Configure Structlog logger for MAC validation
+      ansible.builtin.debug:
+        msg: "Configuring Structlog logger for MAC validation at level: {{ structlog_level }}"
+      run_once: true
+
+    # Process HPE hosts for MAC validation
+    - name: Process HPE hosts
+      when: groups['baremetal'] | map('extract', hostvars) | selectattr('bmc_type', 'equalto', 'ilo') | map(attribute='inventory_hostname') | list | length > 0
+
+      # Process Dell hosts for MAC validation 
+      block:
+        - name: Get MAC addresses from iLO (HPE)
+          ansible.builtin.shell: >
+            python3 {{ playbook_dir }}/../library/ilo_utils.py  {{ hostvars[item].bmc_address }}  {{ hostvars[item].bmc_username }}  {{ hostvars[item].bmc_password
+            }}
+            --ribcl
+          args:
+            executable: /bin/bash
+          register: ilo_info_results
+          loop: "{{ groups['baremetal'] | map('extract', hostvars) | selectattr('bmc_type', 'equalto', 'ilo') | map(attribute='inventory_hostname') | list }}"
+          ignore_errors: true
+
+        - name: Process iLO info results for MAC addresses
+          ansible.builtin.set_fact:
+            mac_results: "{{ (mac_results | default({}) if mac_results is mapping else {}) | combine({(item.item | string): {'success': item.rc is defined and item.rc
+              == 0, 'interfaces': {}, 'interface_count': 0, 'invalid_count': 0, 'data_source': 'oob', 'start_time': mac_validation_start, 'end_time': lookup('pipe',
+              'date +%Y-%m-%d\\ %H:%M:%S')}}) }}"
+          loop: "{{ ilo_info_results.results }}"
+          when: item.rc is defined and item.rc == 0 and (mac_results is not string)
+    - name: Process Dell hosts
+      when: groups['baremetal'] | map('extract', hostvars) | selectattr('bmc_type', 'equalto', 'idrac') | map(attribute='inventory_hostname') | list | length > 0
+
+      # Calculate validation statistics
+      block:
+        - name: Get MAC addresses from iDRAC (Dell)
+          ansible.builtin.shell: >
+            python3 {{ playbook_dir }}/../library/idrac_utils.py  {{ hostvars[item].bmc_address }}  {{ hostvars[item].bmc_username }}
+            {{ hostvars[item].bmc_password }}
+          args:
+            executable: /bin/bash
+          register: idrac_info_results
+          loop: "{{ groups['baremetal'] | map('extract', hostvars) | selectattr('bmc_type', 'equalto', 'idrac') | map(attribute='inventory_hostname') | list }}"
+          ignore_errors: true
+
+        - name: Process iDRAC info results for MAC addresses
+          ansible.builtin.set_fact:
+            mac_results: "{{ (mac_results | default({}) if mac_results is mapping else {}) | combine({(item.item | string): {'success': item.rc is defined and item.rc
+              == 0, 'interfaces': {}, 'interface_count': 0, 'invalid_count': 0, 'data_source': 'oob', 'start_time': mac_validation_start, 'end_time': lookup('pipe',
+              'date +%Y-%m-%d\\ %H:%M:%S')}}) }}"
+          loop: "{{ idrac_info_results.results }}"
+          when: item.rc is defined and item.rc == 0 and (mac_results is not string)
+    - name: Calculate MAC validation statistics
+      ansible.builtin.set_fact:
+        mac_stats: >
+          {% set mac_res = mac_results | default({}) if mac_results is mapping else {} %}
+          {
+            "success_count": mac_res | dict2items | selectattr('value.success', 'equalto', true) | list | length,
+            "total_interface_count": mac_res | dict2items | sum(attribute='value.interface_count') | default(0),
+            "total_invalid_count": mac_res | dict2items | sum(attribute='value.invalid_count') | default(0),
+            "direct_source_count": mac_res | dict2items | selectattr('value.data_source', 'equalto', 'direct') | list | length,
+            "oob_source_count": mac_res | dict2items | selectattr('value.data_source', 'equalto', 'oob') | list | length
+          }
+      run_once: true
+
+    - name: Set calculated statistics variables
+      ansible.builtin.set_fact:
+        success_count: "{{ mac_stats.success_count | int }}"
+        total_interface_count: "{{ mac_stats.total_interface_count | int }}"
+        total_invalid_count: "{{ mac_stats.total_invalid_count | int }}"
+        direct_source_count: "{{ mac_stats.direct_source_count | int }}"
+        oob_source_count: "{{ mac_stats.oob_source_count | int }}"
+        success_int: "{{ mac_stats.success_count | int }}"
+      run_once: true
+
+    - name: Display MAC validation summary
+      ansible.builtin.debug:
+        msg:
+          - "MAC Address Validation Summary:"
+          - "Total hosts: {{ groups['baremetal'] | length }}"
+          - "Successful validations: {{ success_count }}"
+          - "Direct access validations: {{ direct_source_count }}"
+          - "OOB management validations: {{ oob_source_count }}"
+          - "Total valid interfaces discovered: {{ total_interface_count }}"
+          - "Total invalid interfaces: {{ total_invalid_count }}"
+      run_once: true
+
+    # Save validation results 
+    - name: Register validation end
+      ansible.builtin.set_fact:
+        mac_validation_end: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      run_once: true
+
+    - name: Store MAC validation results
+      ansible.builtin.set_fact:
+        validation_results: "{{ (validation_results | default({}) if validation_results is mapping else {}) | combine({'mac': {'start_time': mac_validation_start,
+          'end_time': mac_validation_end, 'results': mac_results, 'summary': {'total': groups['baremetal'] | length, 'success': success_count | int, 'direct_source':
+          direct_source_count | int, 'oob_source': oob_source_count | int, 'total_interfaces': total_interface_count | int, 'invalid_interfaces': total_invalid_count
+          | int}}}) }}"
+      run_once: true
+
+    # Update check counters for final report
+    - name: Calculate values for check counters
+      ansible.builtin.set_fact:
+        host_count: "{{ groups['baremetal'] | length }}"
+        invalid_int: "{{ total_invalid_count | int }}"
+      run_once: true
+
+    - name: Set statistics
+      ansible.builtin.set_fact:
+        failed_hosts: "{{ host_count | int - success_int | int }}"
+      run_once: true
+
+    - name: Update check counters
+      ansible.builtin.set_fact:
+        total_checks: "{{ total_checks | default(0) | int + host_count | int }}"
+        passed_checks: "{{ passed_checks | default(0) | int + success_int | int }}"
+        failed_checks: "{{ failed_checks | default(0) | int + failed_hosts | int }}"
+        warning_checks: "{{ warning_checks | default(0) | int + invalid_int | int }}"
+      run_once: true

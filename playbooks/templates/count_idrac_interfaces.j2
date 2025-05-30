@@ -1,0 +1,10 @@
+{% set count = 0 %}
+{% set idrac_data = item.stdout | from_json %}
+{% if idrac_data is mapping and idrac_data.network_devices is defined %}
+{% for device in idrac_data.network_devices %}
+{% if device.name is defined and device.mac_address is defined %}
+{% set count = count + 1 %}
+{% endif %}
+{% endfor %}
+{% endif %}
+{{ count }}

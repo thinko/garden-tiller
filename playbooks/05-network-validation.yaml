@@ -1,0 +1,179 @@
+---
+# Garden-Tiller: Network Validation Playbook
+# Validates network configuration, connectivity, and performance
+
+- name: Verify network configuration and connectivity
+  hosts: baremetal
+  gather_facts: true
+  tags: [network, all]
+  tasks:
+    - name: Register validation start
+      ansible.builtin.set_fact:
+        net_validation_start: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Set up result dictionary for network validation
+      ansible.builtin.set_fact:
+        net_results: {}
+      delegate_to: localhost
+      run_once: true
+
+    # Bonding/LACP validation
+    - name: Check bonding/LACP configuration
+      ansible.builtin.shell: cat /proc/net/bonding/bond* 2>/dev/null || echo "No bonding interfaces found"
+      register: bonding_status
+      changed_when: false
+      failed_when: false
+
+    - name: Analyze bonding mode
+      ansible.builtin.set_fact:
+        bond_mode: "{{ bonding_status.stdout | regex_findall('Bonding Mode: (.+)$', multiline=True) | first | default('none') }}"
+      when: "'No bonding interfaces found' not in bonding_status.stdout"
+
+    - name: Validate bond mode against expected
+      ansible.builtin.assert:
+        that:
+          - bond_mode in ['802.3ad', 'active-backup', 'balance-alb', 'balance-rr', 'balance-tlb', 'balance-xor', 'broadcast']
+          - bond_mode == expected_bond_mode | default('802.3ad')
+        success_msg: "Bond mode is correctly configured as {{ bond_mode }}"
+        fail_msg: "Bond mode is {{ bond_mode }} but expected {{ expected_bond_mode | default('802.3ad') }}"
+      register: bond_validation
+      when: "'No bonding interfaces found' not in bonding_status.stdout"
+      ignore_errors: true
+
+    # VLANs validation
+    - name: Check VLAN configuration
+      ansible.builtin.shell: "ip -d link show | grep -i vlan || echo 'No VLANs found'"
+      register: vlan_status
+      changed_when: false
+      failed_when: false
+
+    - name: Store VLAN validation result
+      ansible.builtin.set_fact:
+        vlan_result: "{{ 'No VLANs found' not in vlan_status.stdout }}"
+
+    # MTU validation
+    - name: Check MTU on all interfaces
+      ansible.builtin.shell: ip link show | grep -i mtu
+      register: mtu_status
+      changed_when: false
+      failed_when: false
+
+    - name: Validate MTU against expected value
+      ansible.builtin.shell: "ip link show {{ item }} | grep -oP 'mtu\\s+\\K\\d+'"
+      loop: "{{ ansible_interfaces | reject('search', '^lo$') | list }}"
+      register: mtu_check
+      changed_when: false
+      failed_when: false
+
+    - name: Analyze MTU results
+      ansible.builtin.set_fact:
+        mtu_results: "{{ mtu_results | default({}) | combine({item.item: (item.stdout | trim == expected_mtu | string)}) }}"
+      loop: "{{ mtu_check.results }}"
+      when: not item.failed
+
+    # Link Errors
+    - name: Check for interface errors
+      ansible.builtin.shell: "ip -s link show {{ item }} | grep -A 1 'RX:' | tail -n 1"
+      loop: "{{ ansible_interfaces | reject('search', '^lo$') | list }}"
+      register: interface_errors
+      changed_when: false
+      failed_when: false
+
+    - name: Analyze interface errors
+      ansible.builtin.set_fact:
+        interface_errors_detected: "{{ interface_errors_detected | default([]) + [item.item] }}"
+      loop: "{{ interface_errors.results }}"
+      when:
+        - not item.failed
+        - item.stdout is regex('.*[1-9][0-9]*.*')
+
+    # Gateway/Routing
+    - name: Check default gateway
+      ansible.builtin.shell: "ip route | grep default || echo 'No default route'"
+      register: default_route
+      changed_when: false
+      failed_when: false
+
+    - name: Validate default gateway access
+      ansible.builtin.shell: "ping -c 3 $(ip route | grep default | awk '{print $3}') || echo 'Cannot ping gateway'"
+      register: gateway_ping
+      changed_when: false
+      failed_when: false
+      when: "'No default route' not in default_route.stdout"
+
+    # Test internet connectivity
+    - name: Test internet connectivity
+      ansible.builtin.shell: "ping -c 3 8.8.8.8 || echo 'Cannot reach internet'"
+      register: internet_ping
+      changed_when: false
+      failed_when: false
+
+    # DNS Resolution
+    - name: Test DNS resolution
+      ansible.builtin.shell: "ping -c 3 www.redhat.com || echo 'Cannot resolve domain'"
+      register: dns_resolution
+      changed_when: false
+      failed_when: false
+
+    # Compile results
+    - name: Compile network validation results
+      ansible.builtin.set_fact:
+        net_validation:
+          bond:
+            status: "{{ 'No bonding interfaces found' not in bonding_status.stdout }}"
+            mode: "{{ bond_mode | default('none') }}"
+            passed: "{{ bond_validation.failed is not defined }}"
+          vlan:
+            status: "{{ vlan_result }}"
+            details: "{{ vlan_status.stdout_lines }}"
+          mtu:
+            expected: "{{ expected_mtu | default(1500) }}"
+            results: "{{ mtu_results | default({}) }}"
+            passed: "{{ (mtu_results.values() | select('equalto', true) | list | length) == (mtu_results.values() | list | length) if mtu_results is defined else
+              false }}"
+          errors:
+            interfaces_with_errors: "{{ interface_errors_detected | default([]) }}"
+            passed: "{{ (interface_errors_detected | default([])) | length == 0 }}"
+          routing:
+            has_default_route: "{{ 'No default route' not in default_route.stdout }}"
+            gateway_reachable: "{{ 'Cannot ping gateway' not in gateway_ping.stdout if 'No default route' not in default_route.stdout else false }}"
+            internet_reachable: "{{ 'Cannot reach internet' not in internet_ping.stdout }}"
+            dns_resolution: "{{ 'Cannot resolve domain' not in dns_resolution.stdout }}"
+
+    # Update global validation results
+    - name: Add network validation results to global results
+      ansible.builtin.set_fact:
+        validation_results: "{{ validation_results | default({}) | combine({'network': net_validation}) }}"
+        total_checks: "{{ total_checks | default(0) | int + 5 }}" # 5 major network checks
+        passed_checks: "{{ passed_checks | default(0) | int + passed_network_checks }}"
+        failed_checks: "{{ failed_checks | default(0) | int + failed_network_checks }}"
+      vars:
+        passed_network_checks: >-
+          {{
+            (1 if net_validation.bond.passed|default(false) else 0) +
+            (1 if net_validation.vlan.status|default(false) else 0) +
+            (1 if net_validation.mtu.passed|default(false) else 0) +
+            (1 if net_validation.errors.passed|default(false) else 0) +
+            (1 if (net_validation.routing.gateway_reachable|default(false) and
+                  net_validation.routing.internet_reachable|default(false) and
+                  net_validation.routing.dns_resolution|default(false)) else 0)
+          }}
+        failed_network_checks: "{{ 5 - passed_network_checks }}"
+      delegate_to: localhost
+      run_once: true
+
+    # Summary
+    - name: Network validation summary
+      ansible.builtin.debug:
+        msg:
+          - "Network validation completed"
+          - "Bond configuration: {{ 'PASSED' if net_validation.bond.passed | default(false) else 'FAILED' }}"
+          - "VLAN configuration: {{ 'PASSED' if net_validation.vlan.status | default(false) else 'FAILED or N/A' }}"
+          - "MTU configuration: {{ 'PASSED' if net_validation.mtu.passed | default(false) else 'FAILED' }}"
+          - "Interface errors: {{ 'NONE (PASSED)' if net_validation.errors.passed | default(false) else 'DETECTED (FAILED)' }}"
+          - "Routing and connectivity: {{ 'PASSED' if (net_validation.routing.gateway_reachable | default(false) and net_validation.routing.internet_reachable | default(false)
+            and net_validation.routing.dns_resolution | default(false)) else 'FAILED' }}"
+      delegate_to: localhost
+      run_once: true

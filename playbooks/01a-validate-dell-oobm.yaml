@@ -1,0 +1,208 @@
+---
+# Garden-Tiller: Dell iDRAC Out-of-Band Management Validation Playbook
+# Uses Dell iDRAC Redfish API for advanced validation
+
+- name: Verify Dell iDRAC configuration and details
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [oobm, dell, idrac, all]
+  vars:
+    structlog_level: info
+    resilient_policy:
+      retry_count: 3
+      retry_delay: 2
+      circuit_threshold: 5
+    verify_ssl: false # Default to not verify SSL certificates
+  tasks:
+    - name: Register validation start
+      ansible.builtin.set_fact:
+        dell_oobm_validation_start: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      run_once: true
+
+    - name: Set up result dictionary for Dell iDRAC validation
+      ansible.builtin.set_fact:
+        dell_oobm_results: "{{ dell_oobm_results | default({}) if dell_oobm_results is mapping else {} }}"
+      run_once: true
+
+    - name: Configure Structlog logger for Dell iDRAC validation
+      ansible.builtin.debug:
+        msg: "Configuring Structlog logger for Dell iDRAC validation at level: {{ structlog_level }}"
+      run_once: true
+
+    # Identify Dell iDRAC systems
+    - name: Get Dell iDRAC hosts
+      ansible.builtin.set_fact:
+        dell_hosts: "{{ groups['baremetal'] | map('extract', hostvars) | selectattr('bmc_type', 'equalto', 'idrac') | map(attribute='inventory_hostname') | list }}"
+      run_once: true
+
+    - name: Skip playbook if no Dell iDRAC hosts found
+      ansible.builtin.meta: end_play
+      when: dell_hosts | length == 0
+      run_once: true
+
+    - name: Display Dell hosts count
+      ansible.builtin.debug:
+        msg: "Found {{ dell_hosts | length }} Dell iDRAC host(s) to validate"
+      run_once: true
+
+    # Collect Dell iDRAC information using our Python module
+    - name: Collect detailed iDRAC information
+      block:
+        - name: Run iDRAC info collection script
+          ansible.builtin.shell: >
+            python3 {{ playbook_dir }}/../library/idrac_utils.py  {{ hostvars[item].bmc_address }}
+            {{ hostvars[item].bmc_username }}
+            {{ hostvars[item].bmc_password }}
+          args:
+            executable: /bin/bash
+          register: idrac_info_results
+          loop: "{{ dell_hosts }}"
+          ignore_errors: true
+
+        - name: Process iDRAC info results
+          ansible.builtin.set_fact:
+            dell_oobm_results: "{{ (dell_oobm_results | default({}) if dell_oobm_results is mapping else {}) | combine({(item.item | string): {'success': not item.failed,
+              'info': (item.stdout | from_json) if not item.failed else {}, 'error': item.stderr if item.failed else ''}}) }}"
+          loop: "{{ idrac_info_results.results }}"
+          failed_when: false
+      rescue:
+        - name: Log iDRAC info collection failures
+          ansible.builtin.debug:
+            msg: "Failed to collect iDRAC information for some hosts - check individual results"
+          run_once: true
+
+    # Validate network configuration
+    - name: Validate iDRAC network configuration
+      ansible.builtin.set_fact:
+        dell_oobm_results: >
+          {% set node_results = dell_oobm_results | default({}) if dell_oobm_results is mapping else {} %}
+          {% set node = item | string %}
+          {% set current = node_results[node] | default({}) if node in node_results and node_results[node] is mapping else {} %}
+          {% if current.success | default(false) %}
+            {% set network_devices = current.info.network_devices | default([]) %}
+            {% set network_ok = network_devices | length > 0 %}
+            {% set updated = current | combine({
+                'network_validation': {
+                  'valid': network_ok,
+                  'devices': network_devices
+                }
+              })
+            %}
+            {{ node_results | combine({node: updated}) }}
+          {% else %}
+            {{ node_results }}
+          {% endif %}
+      loop: "{{ dell_hosts }}"
+
+    # Validate NTP configuration
+    - name: Validate iDRAC NTP configuration
+      ansible.builtin.set_fact:
+        dell_oobm_results: >
+          {% set node_results = dell_oobm_results | default({}) if dell_oobm_results is mapping else {} %}
+          {% set node = item | string %}
+          {% set current = node_results[node] | default({}) if node in node_results and node_results[node] is mapping else {} %}
+          {% if current.success | default(false) %}
+            {% set ntp_settings = current.info.ntp_settings | default({}) %}
+            {% set ntp_enabled = ntp_settings.ntp_enabled | default(false) %}
+            {% set ntp_servers = ntp_settings.ntp_servers | default([]) %}
+            {% set ntp_ok = ntp_enabled and ntp_servers | length > 0 %}
+            {% set updated = current | combine({
+                'ntp_validation': {
+                  'valid': ntp_ok,
+                  'ntp_enabled': ntp_enabled,
+                  'ntp_servers': ntp_servers
+                }
+              })
+            %}
+            {{ node_results | combine({node: updated}) }}
+          {% else %}
+            {{ node_results }}
+          {% endif %}
+      loop: "{{ dell_hosts }}"
+
+    # Validate DNS configuration
+    - name: Validate iDRAC DNS configuration
+      ansible.builtin.set_fact:
+        dell_oobm_results: >
+          {% set node_results = dell_oobm_results | default({}) if dell_oobm_results is mapping else {} %}
+          {% set node = item | string %}
+          {% set current = node_results[node] | default({}) if node in node_results and node_results[node] is mapping else {} %}
+          {% if current.success | default(false) %}
+            {% set dns_settings = current.info.dns_settings | default({}) %}
+            {% set dns_enabled = dns_settings.dns_enabled | default(false) %}
+            {% set dns_servers = dns_settings.dns_servers | default([]) %}
+            {% set dns_ok = dns_enabled and dns_servers | length > 0 %}
+            {% set updated = current | combine({
+                'dns_validation': {
+                  'valid': dns_ok,
+                  'dns_enabled': dns_enabled,
+                  'dns_servers': dns_servers
+                }
+              })
+            %}
+            {{ node_results | combine({node: updated}) }}
+          {% else %}
+            {{ node_results }}
+          {% endif %}
+      loop: "{{ dell_hosts }}"
+
+    # Validate iDRAC uptime (identify recently rebooted systems)
+    - name: Validate iDRAC uptime
+      ansible.builtin.set_fact:
+        dell_oobm_results: >
+          {% set node_results = dell_oobm_results | default({}) if dell_oobm_results is mapping else {} %}
+          {% set node = item | string %}
+          {% set current = node_results[node] | default({}) if node in node_results and node_results[node] is mapping else {} %}
+          {% if current.success | default(false) %}
+            {% set uptime = current.info.uptime | default({}) %}
+            {% set days = uptime.days | default(0) %}
+            {% set hours = uptime.hours | default(0) %}
+            {% set uptime_ok = days > 0 or hours > 1 %}
+            {% set updated = current | combine({
+                'uptime_validation': {
+                  'valid': uptime_ok,
+                  'uptime': uptime
+                }
+              })
+            %}
+            {{ node_results | combine({node: updated}) }}
+          {% else %}
+            {{ node_results }}
+          {% endif %}
+      loop: "{{ dell_hosts }}"
+
+    # Save validation results 
+    - name: Register validation end
+      ansible.builtin.set_fact:
+        dell_oobm_validation_end: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      run_once: true
+
+    - name: Store Dell iDRAC validation results
+      ansible.builtin.set_fact:
+        validation_results: "{{ (validation_results | default({}) if validation_results is mapping else {}) | combine({'dell_oobm': {'start_time': dell_oobm_validation_start,
+          'end_time': dell_oobm_validation_end, 'results': dell_oobm_results, 'summary': {'total': dell_hosts | length, 'success': dell_oobm_results | dict2items
+          | selectattr('value.success', 'defined') | selectattr('value.success') | list | length, 'network_issues': dell_oobm_results | dict2items | selectattr('value.network_validation.valid',
+          'defined') | rejectattr('value.network_validation.valid') | list | length, 'ntp_issues': dell_oobm_results | dict2items | selectattr('value.ntp_validation.valid',
+          'defined') | rejectattr('value.ntp_validation.valid') | list | length, 'dns_issues': dell_oobm_results | dict2items | selectattr('value.dns_validation.valid',
+          'defined') | rejectattr('value.dns_validation.valid') | list | length, 'recent_reboots': dell_oobm_results | dict2items | selectattr('value.uptime_validation.valid',
+          'defined') | rejectattr('value.uptime_validation.valid') | list | length}}}) }}"
+      delegate_to: localhost
+      run_once: true
+
+    # Update check counters for final report
+    - name: Update check counters
+      ansible.builtin.set_fact:
+        total_checks: "{{ total_checks | default(0) | int + (dell_hosts | length * 4) }}" # network, ntp, dns, uptime
+        passed_checks: "{{ passed_checks | default(0) | int + (dell_oobm_results | dict2items | selectattr('value.network_validation.valid', 'defined') | selectattr('value.network_validation.valid')
+          | list | length) + (dell_oobm_results | dict2items | selectattr('value.ntp_validation.valid', 'defined') | selectattr('value.ntp_validation.valid') | list
+          | length) + (dell_oobm_results | dict2items | selectattr('value.dns_validation.valid', 'defined') | selectattr('value.dns_validation.valid') | list | length)
+          + (dell_oobm_results | dict2items | selectattr('value.uptime_validation.valid', 'defined') | selectattr('value.uptime_validation.valid') | list | length)
+          }}"
+        failed_checks: "{{ failed_checks | default(0) | int + ((dell_hosts | length * 4) - (dell_oobm_results | dict2items | selectattr('value.network_validation.valid',
+          'defined') | selectattr('value.network_validation.valid') | list | length) - (dell_oobm_results | dict2items | selectattr('value.ntp_validation.valid',
+          'defined') | selectattr('value.ntp_validation.valid') | list | length) - (dell_oobm_results | dict2items | selectattr('value.dns_validation.valid', 'defined')
+          | selectattr('value.dns_validation.valid') | list | length) - (dell_oobm_results | dict2items | selectattr('value.uptime_validation.valid', 'defined') |
+          selectattr('value.uptime_validation.valid') | list | length)) }}"
+      delegate_to: localhost
+      run_once: true

@@ -1,0 +1,145 @@
+---
+# Garden-Tiller: DNS Validation Playbook
+# Validates DNS configuration and record availability
+
+- name: Verify DNS configuration and resolution
+  hosts: all
+  gather_facts: true
+  tags: [dns, all]
+  tasks:
+    - name: Register validation start
+      ansible.builtin.set_fact:
+        dns_validation_start: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Set up result dictionary for DNS validation
+      ansible.builtin.set_fact:
+        dns_results: {}
+      delegate_to: localhost
+      run_once: true
+
+    # Check DNS configuration
+    - name: Check resolv.conf configuration
+      ansible.builtin.shell: cat /etc/resolv.conf | grep -v '^#'
+      register: resolv_conf
+      changed_when: false
+      failed_when: false
+
+    - name: Extract nameservers from resolv.conf
+      ansible.builtin.set_fact:
+        configured_nameservers: "{{ resolv_conf.stdout | regex_findall('nameserver\\s+([0-9\\.]+)', multiline=True) }}"
+
+    - name: Validate configured nameservers against expected
+      ansible.builtin.set_fact:
+        nameserver_validation: "{{ configured_nameservers | intersect(dns_servers) | length > 0 }}"
+      when: dns_servers is defined
+
+    # DNS resolution tests
+    - name: Test basic DNS resolution (external domains)
+      ansible.builtin.shell: "{% raw %}host {{ item }} || dig {{ item }} || nslookup {{ item }}{% endraw %}"
+      loop:
+        - www.redhat.com
+        - www.google.com
+      register: external_dns_tests
+      changed_when: false
+      failed_when: false
+
+    - name: Analyze external DNS resolution results
+      ansible.builtin.set_fact:
+        external_dns_passed: "{{ not external_dns_tests.results | select('failed') | list | length > 0 }}"
+
+    # Test required OpenShift DNS records
+    - name: Test OpenShift required DNS records
+      ansible.builtin.shell: "{% raw %}host {{ item.name }} || dig {{ item.name }} || nslookup {{ item.name }}{% endraw %}"
+      loop: "{{ expected_records | default([]) }}"
+      register: openshift_dns_tests
+      changed_when: false
+      failed_when: false
+      when: expected_records is defined
+
+    - name: Analyze required DNS record results
+      ansible.builtin.set_fact:
+        openshift_dns_test_results: "{{ openshift_dns_test_results | default([]) + [{'record': item.item.name, 'passed': not item.failed, 'output': item.stdout}]
+          }}"
+      loop: "{{ openshift_dns_tests.results | default([]) }}"
+      when: expected_records is defined
+
+    - name: Analyze required DNS records
+      ansible.builtin.set_fact:
+        openshift_dns_passed: "{{ not openshift_dns_test_results | default([]) | selectattr('passed', 'equalto', false) | list | length > 0 }}"
+      when: expected_records is defined
+
+    # Reverse DNS tests
+    - name: Test reverse DNS resolution for local IP
+      ansible.builtin.shell: "{% raw %}host {{ ansible_default_ipv4.address }} || dig -x {{ ansible_default_ipv4.address }} || nslookup {{ ansible_default_ipv4.address
+        }}{% endraw %}"
+      register: reverse_dns_test
+      changed_when: false
+      failed_when: false
+      when: ansible_default_ipv4 is defined and ansible_default_ipv4.address is defined
+
+    # Test DNS server configuration for hosts running DNS
+    - name: Check DNS server configuration
+      ansible.builtin.shell: "systemctl status named || systemctl status bind9 || systemctl status dnsmasq"
+      register: dns_service_status
+      changed_when: false
+      failed_when: false
+      when: "'dns_server' in group_names"
+
+    - name: Validate DNS service is running
+      ansible.builtin.set_fact:
+        dns_service_running: "{{ 'active (running)' in dns_service_status.stdout }}"
+      when: "'dns_server' in group_names"
+
+    # Compile results
+    - name: Compile DNS validation results
+      ansible.builtin.set_fact:
+        dns_validation:
+          nameservers:
+            configured: "{{ configured_nameservers | default([]) }}"
+            expected: "{{ dns_servers | default([]) }}"
+            passed: "{{ nameserver_validation | default(false) }}"
+          external_resolution:
+            passed: "{{ external_dns_passed | default(false) }}"
+          openshift_records:
+            records: "{{ expected_records | default([]) }}"
+            results: "{{ openshift_dns_test_results | default([]) }}"
+            passed: "{{ openshift_dns_passed | default(true) }}"
+          reverse_dns:
+            passed: "{{ not reverse_dns_test.failed | default(false) if ansible_default_ipv4 is defined else 'N/A' }}"
+          dns_server:
+            running: "{{ dns_service_running | default('N/A') }}"
+            is_dns_server: "{{ 'dns_server' in group_names }}"
+
+    # Update global validation results
+    - name: Add DNS validation results to global results
+      ansible.builtin.set_fact:
+        validation_results: "{{ validation_results | default({}) | combine({'dns': dns_validation}) }}"
+        total_checks: "{{ total_checks | default(0) | int + 4 }}" # 4 major DNS checks
+        passed_checks: "{{ passed_checks | default(0) | int + passed_dns_checks }}"
+        failed_checks: "{{ failed_checks | default(0) | int + failed_dns_checks }}"
+      vars:
+        passed_dns_checks: >-
+          {{
+            (1 if dns_validation.nameservers.passed|default(false) else 0) +
+            (1 if dns_validation.external_resolution.passed|default(false) else 0) +
+            (1 if dns_validation.openshift_records.passed|default(false) else 0) +
+            (1 if dns_validation.reverse_dns.passed|default(false) else 0)
+          }}
+        failed_dns_checks: "{{ 4 - passed_dns_checks }}"
+      delegate_to: localhost
+      run_once: true
+
+    # Summary
+    - name: DNS validation summary
+      ansible.builtin.debug:
+        msg:
+          - "DNS validation completed"
+          - "Nameserver configuration: {{ 'PASSED' if dns_validation.nameservers.passed | default(false) else 'FAILED' }}"
+          - "External domain resolution: {{ 'PASSED' if dns_validation.external_resolution.passed | default(false) else 'FAILED' }}"
+          - "OpenShift required records: {{ 'PASSED' if dns_validation.openshift_records.passed | default(false) else 'FAILED' }}"
+          - "Reverse DNS lookup: {{ 'PASSED' if dns_validation.reverse_dns.passed | default(false) else 'FAILED' }}"
+          - "DNS server status: {{ dns_validation.dns_server.running if dns_validation.dns_server.is_dns_server else 'N/A' }}"
+      delegate_to: localhost
+      run_once: true

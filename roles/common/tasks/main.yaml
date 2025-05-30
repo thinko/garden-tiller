@@ -1,0 +1,51 @@
+---
+# Common role main tasks
+- name: Include OS-specific variables
+  ansible.builtin.include_vars: "{{ item }}"
+  with_first_found:
+    - "{{ ansible_distribution }}-{{ ansible_distribution_major_version }}.yaml"
+    - "{{ ansible_distribution }}.yaml"
+    - "{{ ansible_os_family }}.yaml"
+    - "default.yaml"
+  tags: always
+
+- name: Check if running in a container
+  ansible.builtin.stat:
+    path: "/.dockerenv"
+  register: dockerenv
+  tags: always
+
+- name: Set container fact
+  ansible.builtin.set_fact:
+    running_in_container: "{{ dockerenv.stat.exists | default(false) }}"
+  tags: always
+
+- name: Check for required tools
+  ansible.builtin.shell: "which {{ item }} || echo 'Missing: {{ item }}'"
+  register: required_tools
+  changed_when: false
+  loop: "{{ tools_list }}"
+  tags: always
+
+- name: Verify required tools are available
+  ansible.builtin.fail:
+    msg: "Required tool '{{ item.item }}' is not available!"
+  when: "'Missing' in item.stdout"
+  loop: "{{ required_tools.results }}"
+  tags: always
+
+- name: Create results directory
+  ansible.builtin.file:
+    path: "{{ results_directory }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  run_once: true
+  tags: always
+
+- name: Set validation UUID
+  ansible.builtin.set_fact:
+    validation_id: "{{ lookup('pipe', 'uuidgen') }}"
+  delegate_to: localhost
+  run_once: true
+  tags: always

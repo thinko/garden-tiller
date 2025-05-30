@@ -1,0 +1,10 @@
+{% set interfaces = {} %}
+{% set idrac_data = item.stdout | from_json %}
+{% if idrac_data is mapping and idrac_data.network_devices is defined %}
+{% for device in idrac_data.network_devices %}
+{% if device.name is defined and device.mac_address is defined %}
+{% set _ = interfaces.update({'oob_' + device.name | string: {'mac_address': device.mac_address, 'state': 'unknown', 'source': 'idrac'}}) %}
+{% endif %}
+{% endfor %}
+{% endif %}
+{{ interfaces | to_yaml }}

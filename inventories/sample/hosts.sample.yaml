@@ -1,0 +1,113 @@
+---
+# Garden-Tiller sample inventory
+# Replace with your actual lab environment details
+
+# Hosts with BMC/IPMI access
+baremetal:
+  hosts:
+    # Dell Server Example
+    dell-node1:
+      ansible_host: 192.168.1.101
+      bmc_address: 192.168.10.101
+      bmc_username: root
+      bmc_password: calvin
+      bmc_type: idrac  # Enables Dell-specific validations
+      mac_addresses:
+        - interface: eno1
+          expected_mac: "00:11:22:33:44:55"
+        - interface: eno2
+          expected_mac: "00:11:22:33:44:56"
+      raid:
+        controller: "PERC H730"
+        configuration: "RAID1"  # Expected RAID configuration
+      ntp_servers:
+        - "10.0.0.1"
+        - "10.0.0.2"
+    
+    # HPE Server Example
+    hpe-node2:
+      ansible_host: 192.168.1.102
+      bmc_address: 192.168.10.102
+      bmc_username: Administrator
+      bmc_password: password
+      bmc_type: ilo  # Enables HPE-specific validations
+      mac_addresses:
+        - interface: eno1
+          expected_mac: "AA:BB:CC:DD:EE:FF"
+      raid:
+        controller: "SmartArray P440ar"
+        configuration: "RAID5"
+      min_ilo_firmware: "2.61"  # Minimum required iLO firmware version
+      expected_boot_device: "HDD"  # Expected boot device setting
+        - interface: eno2
+          expected_mac: "AA:BB:CC:DD:EE:FE"
+      raid:
+        controller: Smart Array P440ar
+        configuration: "RAID1"
+
+# Network equipment (switches, routers)
+network_devices:
+  hosts:
+    switch1:
+      ansible_host: 192.168.1.251
+      ansible_network_os: ios  # Options: ios, nxos, eos
+      ansible_user: admin
+      ansible_password: password
+      device_type: switch
+    
+    router1:
+      ansible_host: 192.168.1.254
+      ansible_network_os: ios
+      ansible_user: admin
+      ansible_password: password
+      device_type: router
+
+# Infrastructure services
+infrastructure:
+  hosts:
+    dns_server:
+      ansible_host: 192.168.1.10
+      service_type: dns
+      expected_records:
+        - {name: "api.cluster.example.com", type: "A", value: "192.168.1.200"}
+        - {name: "*.apps.cluster.example.com", type: "A", value: "192.168.1.201"}
+    
+    dhcp_server:
+      ansible_host: 192.168.1.11
+      service_type: dhcp
+      dhcp_range_start: "192.168.1.100"
+      dhcp_range_end: "192.168.1.200"
+    
+    ntp_server:
+      ansible_host: 192.168.1.12
+      service_type: ntp
+      stratum: 3
+
+# Group variables
+all:
+  vars:
+    ansible_user: root
+    ansible_ssh_private_key_file: ~/.ssh/id_rsa
+    validate_firmware: true
+    validate_network: true
+    validate_services: true
+    proxy_url: http://proxy.example.com:3128
+    no_proxy: "localhost,127.0.0.1,192.168.1.0/24"
+    ntp_servers:
+      - 0.rhel.pool.ntp.org
+      - 1.rhel.pool.ntp.org
+    dns_servers:
+      - 192.168.1.10
+      - 8.8.8.8
+    expected_mtu: 9000  # For jumbo frames
+    expected_bond_mode: 802.3ad  # LACP
+    expected_vlans:
+      - id: 100
+        name: management
+      - id: 200
+        name: storage
+      - id: 300
+        name: migration
+      - id: 400
+        name: tenant
+    report_output: html  # Options: html, json, pdf

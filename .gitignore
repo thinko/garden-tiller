@@ -1,0 +1,66 @@
+# Garden-Tiller Project .gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+backups*
+
+# Virtual Environments
+venv/
+ENV/
+.venv/
+.env/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+*.sublime-workspace
+*.sublime-project
+
+# Project specific
+logs/
+reports/
+*.log
+results/
+
+# Container files
+.container-*
+*.tar
+*.tar.gz
+
+# Ansible
+*.retry
+
+# Temp files
+tmp/
+temp/
+.tmp/
+*~
+inventories/test-hpe.yaml

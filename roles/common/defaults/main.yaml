@@ -1,0 +1,27 @@
+---
+# Default variables for common role
+
+# Directories
+results_directory: "{{ playbook_dir }}/../results"
+logs_directory: "{{ playbook_dir }}/../logs"
+
+# List of required tools
+tools_list:
+  - ping
+  - ip
+  - ssh
+  - cat
+  - grep
+  - awk
+
+# Timeouts (in seconds)
+default_timeout: 30
+long_timeout: 120
+
+# Retry settings
+max_retries: 3
+retry_delay: 5
+
+# Reporting
+report_format: "html" # Can be html, json, or text
+include_diagrams: true

@@ -1,0 +1,10 @@
+{% set count = 0 %}
+{% set ilo_data = item.stdout | from_json %}
+{% if ilo_data is mapping and ilo_data.network_adapters is defined %}
+{% for adapter in ilo_data.network_adapters %}
+{% if adapter.port is defined and adapter.mac_address is defined %}
+{% set count = count + 1 %}
+{% endif %}
+{% endfor %}
+{% endif %}
+{{ count }}

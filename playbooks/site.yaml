@@ -1,0 +1,80 @@
+---
+# Garden-Tiller: OpenShift Lab Environment Validation Suite
+# Main playbook that orchestrates all validation steps
+
+- name: Initialize validation process
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: always
+  tasks:
+    - name: Create reports directory
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../reports"
+        state: directory
+        mode: "0755"
+
+    - name: Set validation start time
+      ansible.builtin.set_fact:
+        validation_start_time: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+        report_file: "{{ playbook_dir }}/../reports/lab-report-{{ lookup('pipe', 'date +%Y%m%d') }}.html"
+
+    - name: Initialize validation results dictionary
+      ansible.builtin.set_fact:
+        validation_results: {}
+        total_checks: 0
+        passed_checks: 0
+        failed_checks: 0
+        warning_checks: 0
+
+- name: Include OOBM validation playbook
+  import_playbook: 01-validate-oobm.yaml
+  tags: [oobm, all]
+
+- name: Include Dell iDRAC validation playbook
+  import_playbook: 01a-validate-dell-oobm.yaml
+  tags: [oobm, dell, idrac, all]
+
+- name: Include HPE iLO validation playbook
+  import_playbook: 01b-validate-hpe-oobm.yaml
+  tags: [oobm, hpe, ilo, all]
+
+- name: Include IPMI validation playbook
+  import_playbook: 02-enumerate-ipmi.yaml
+  tags: [ipmi, all]
+
+- name: Include firmware update validation playbook
+  import_playbook: 03-firmware-update.yaml
+  tags: [firmware, all]
+
+- name: Include MAC address validation playbook
+  import_playbook: 04-mac-address-validation.yaml
+  tags: [mac, all]
+
+- name: Include network validation playbook
+  import_playbook: 05-network-validation.yaml
+  tags: [network, all]
+
+- name: Include RAID validation playbook
+  import_playbook: 06-raid-validation.yaml
+  tags: [raid, all]
+
+- name: Include DNS validation playbook
+  import_playbook: 07-dns-validation.yaml
+  tags: [dns, all]
+
+- name: Include DHCP validation playbook
+  import_playbook: 08-dhcp-validation.yaml
+  tags: [dhcp, all]
+
+- name: Include time synchronization validation playbook
+  import_playbook: 09-time-sync-validation.yaml
+  tags: [timesync, all]
+
+- name: Include internet/proxy access validation playbook
+  import_playbook: 10-internet-proxy-validation.yaml
+  tags: [internet, all]
+
+- name: Generate final validation report
+  import_playbook: 11-generate-report.yaml
+  tags: [report, always]
