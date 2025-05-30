@@ -55,26 +55,30 @@
   import_playbook: 05-network-validation.yaml
   tags: [network, all]
 
+- name: Include clean boot network validation playbook
+  import_playbook: 06-clean-boot-network-validation.yaml
+  tags: [network, lacp, clean-boot, all]
+
 - name: Include RAID validation playbook
-  import_playbook: 06-raid-validation.yaml
+  import_playbook: 07-raid-validation.yaml
   tags: [raid, all]
 
 - name: Include DNS validation playbook
-  import_playbook: 07-dns-validation.yaml
+  import_playbook: 08-dns-validation.yaml
   tags: [dns, all]
 
 - name: Include DHCP validation playbook
-  import_playbook: 08-dhcp-validation.yaml
+  import_playbook: 09-dhcp-validation.yaml
   tags: [dhcp, all]
 
 - name: Include time synchronization validation playbook
-  import_playbook: 09-time-sync-validation.yaml
+  import_playbook: 10-time-sync-validation.yaml
   tags: [timesync, all]
 
 - name: Include internet/proxy access validation playbook
-  import_playbook: 10-internet-proxy-validation.yaml
+  import_playbook: 11-internet-proxy-validation.yaml
   tags: [internet, all]
 
 - name: Generate final validation report
-  import_playbook: 11-generate-report.yaml
+  import_playbook: 12-generate-report.yaml
   tags: [report, always]

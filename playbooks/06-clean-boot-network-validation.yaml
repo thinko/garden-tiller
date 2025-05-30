@@ -1,0 +1,419 @@
+---
+# Garden-Tiller: Clean Boot Network Validation Playbook
+# Orchestrates comprehensive LACP validation testing in clean boot scenarios
+# Integrates with the clean boot LACP orchestrator for exhaustive testing
+
+- name: Clean Boot Network Validation with LACP Testing
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  tags: [network, lacp, clean-boot, all]
+  vars:
+    structlog_level: info
+    resilient_policy:
+      retry_count: 3
+      retry_delay: 5
+      circuit_threshold: 5
+    clean_boot_orchestrator: "{{ playbook_dir }}/../scripts/clean_boot_lacp_orchestrator.py"
+    integration_script: "{{ playbook_dir }}/../scripts/run_clean_boot_lacp.sh"
+    results_output_dir: "{{ playbook_dir }}/../reports"
+    clean_boot_mode: true
+    test_all_permutations: true
+    parallel_hosts: 3
+    comprehensive_testing: true
+  
+  tasks:
+    - name: Register validation start
+      ansible.builtin.set_fact:
+        clean_boot_validation_start: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      run_once: true
+
+    - name: Set up result dictionary for clean boot validation
+      ansible.builtin.set_fact:
+        clean_boot_results: "{{ clean_boot_results | default({}) if clean_boot_results is mapping else {} }}"
+      run_once: true
+
+    - name: Display clean boot testing banner
+      ansible.builtin.debug:
+        msg:
+          - "========================================="
+          - "Garden-Tiller Clean Boot LACP Validation"
+          - "========================================="
+          - "Starting comprehensive LACP testing in clean boot scenario"
+          - "This will test all bonding mode permutations across all hosts"
+          - "Testing {{ groups['baremetal'] | default([]) | length }} baremetal hosts"
+          - "Results will be saved to: {{ results_output_dir }}"
+      run_once: true
+
+    - name: Check prerequisites for clean boot testing
+      block:
+        - name: Verify we have baremetal hosts
+          ansible.builtin.fail:
+            msg: "No baremetal hosts found in inventory"
+          when: groups['baremetal'] | default([]) | length == 0
+
+        - name: Check if clean boot orchestrator exists
+          ansible.builtin.stat:
+            path: "{{ clean_boot_orchestrator }}"
+          register: orchestrator_stat
+
+        - name: Fail if orchestrator not found
+          ansible.builtin.fail:
+            msg: "Clean boot orchestrator not found at {{ clean_boot_orchestrator }}"
+          when: not orchestrator_stat.stat.exists
+
+        - name: Check if integration script exists
+          ansible.builtin.stat:
+            path: "{{ integration_script }}"
+          register: integration_stat
+
+        - name: Fail if integration script not found
+          ansible.builtin.fail:
+            msg: "Integration script not found at {{ integration_script }}"
+          when: not integration_stat.stat.exists
+
+        - name: Ensure results output directory exists
+          ansible.builtin.file:
+            path: "{{ results_output_dir }}"
+            state: directory
+            mode: '0755'
+
+        - name: Check if running as root
+          ansible.builtin.command: id -u
+          register: user_id
+          changed_when: false
+
+        - name: Warn if not running as root
+          ansible.builtin.debug:
+            msg: "WARNING: Clean boot LACP tests require root privileges. Tests may fail."
+          when: user_id.stdout != "0"
+
+        - name: Check Python dependencies
+          ansible.builtin.shell: python3 -c "import structlog, pybreaker, yaml"
+          register: python_deps_check
+          changed_when: false
+          failed_when: false
+
+        - name: Install Python dependencies if missing
+          ansible.builtin.pip:
+            name:
+              - structlog
+              - pybreaker
+              - pyyaml
+            state: present
+          when: python_deps_check.rc != 0
+          become: true
+
+    - name: Pre-validation network discovery
+      block:
+        - name: Discover current network state across all hosts
+          ansible.builtin.shell: |
+            echo "=== Network Interface Discovery ==="
+            for iface in $(ip link show | grep -E '^[0-9]+:' | awk -F': ' '{print $2}' | cut -d'@' -f1 | grep -v '^lo$'); do
+              if [[ ! "$iface" =~ ^(lo|docker|br-|virbr|veth|bond|team) ]]; then
+                echo "Interface: $iface"
+                echo "  MAC: $(cat /sys/class/net/$iface/address 2>/dev/null || echo 'unknown')"
+                echo "  State: $(cat /sys/class/net/$iface/operstate 2>/dev/null || echo 'unknown')"
+                if command -v ethtool >/dev/null 2>&1; then
+                  speed=$(ethtool "$iface" 2>/dev/null | grep Speed: | awk '{print $2}' || echo 'unknown')
+                  echo "  Speed: $speed"
+                fi
+                echo "---"
+              fi
+            done
+            
+            echo "=== Current Bonding Interfaces ==="
+            if [[ -d /proc/net/bonding ]]; then
+              ls -1 /proc/net/bonding/ 2>/dev/null || echo "No existing bonds"
+            else
+              echo "Bonding module not loaded"
+            fi
+            
+            echo "=== Switch Connectivity Test ==="
+            {% for host in groups['baremetal'] %}
+            {% if hostvars[host].get('switch_ip') %}
+            echo "Testing switch for {{ host }}: {{ hostvars[host]['switch_ip'] }}"
+            if ping -c 2 -W 3 "{{ hostvars[host]['switch_ip'] }}" >/dev/null 2>&1; then
+              echo "  SUCCESS: Switch {{ hostvars[host]['switch_ip'] }} reachable"
+            else
+              echo "  FAILED: Switch {{ hostvars[host]['switch_ip'] }} not reachable"
+            fi
+            {% endif %}
+            {% endfor %}
+          register: network_discovery
+          changed_when: false
+          delegate_to: "{{ item }}"
+          loop: "{{ groups['baremetal'] }}"
+          ignore_errors: true
+
+        - name: Store network discovery results
+          ansible.builtin.set_fact:
+            clean_boot_results: >-
+              {{ clean_boot_results | combine({
+                  'pre_validation_discovery': network_discovery.results | 
+                  map(attribute='stdout') | list
+                }) 
+              }}
+
+    # Run the comprehensive clean boot LACP orchestration
+    - name: Execute clean boot LACP orchestration
+      block:
+        - name: Prepare environment variables for orchestration
+          ansible.builtin.set_fact:
+            orchestration_env:
+              NO_CLEAN_BOOT: "{{ 'false' if clean_boot_mode else 'true' }}"
+              NO_PERMUTATIONS: "{{ 'false' if test_all_permutations else 'true' }}"
+              PARALLEL_HOSTS: "{{ parallel_hosts }}"
+
+        - name: Run clean boot LACP orchestration script
+          ansible.builtin.command:
+            cmd: >
+              {{ integration_script }}
+              --inventory {{ inventory_file }}
+              {% if not clean_boot_mode %}--no-clean-boot{% endif %}
+              {% if not test_all_permutations %}--no-permutations{% endif %}
+              --parallel-hosts {{ parallel_hosts }}
+              --verbose
+          args:
+            chdir: "{{ playbook_dir }}/.."
+          environment: "{{ orchestration_env }}"
+          register: orchestration_result
+          timeout: 7200  # 2 hour timeout for comprehensive testing
+          become: true
+
+        - name: Process orchestration results
+          ansible.builtin.set_fact:
+            clean_boot_results: >-
+              {{ clean_boot_results | combine({
+                  'orchestration': {
+                    'success': not orchestration_result.failed,
+                    'stdout': orchestration_result.stdout,
+                    'stderr': orchestration_result.stderr if orchestration_result.failed else '',
+                    'return_code': orchestration_result.rc,
+                    'execution_time': orchestration_result.delta,
+                    'test_timestamp': ansible_date_time.iso8601
+                  }
+                }) 
+              }}
+
+        - name: Display orchestration summary
+          ansible.builtin.debug:
+            msg:
+              - "Clean Boot LACP Orchestration completed"
+              - "Success: {{ not orchestration_result.failed }}"
+              - "Return code: {{ orchestration_result.rc }}"
+              - "Execution time: {{ orchestration_result.delta }}"
+          when: orchestration_result is defined
+
+      rescue:
+        - name: Handle orchestration failure
+          ansible.builtin.set_fact:
+            clean_boot_results: >-
+              {{ clean_boot_results | combine({
+                  'orchestration': {
+                    'success': false,
+                    'error': ansible_failed_result.msg,
+                    'test_timestamp': ansible_date_time.iso8601
+                  }
+                }) 
+              }}
+
+        - name: Log orchestration failure
+          ansible.builtin.debug:
+            msg:
+              - "Clean Boot LACP Orchestration failed"
+              - "Error: {{ ansible_failed_result.msg }}"
+
+    # Collect and analyze results
+    - name: Collect comprehensive test results
+      block:
+        - name: Find generated result files
+          ansible.builtin.find:
+            paths: "{{ results_output_dir }}"
+            patterns: 
+              - "clean_boot_lacp_results_*.json"
+              - "lacp_results_*.json"
+            age: "-1d"  # Files from last day
+          register: result_files
+
+        - name: Load and analyze result files
+          ansible.builtin.include_vars:
+            file: "{{ item.path }}"
+            name: "result_{{ item.path | basename | regex_replace('\\.json$', '') }}"
+          loop: "{{ result_files.files }}"
+          when: result_files.files | length > 0
+          ignore_errors: true
+
+        - name: Generate summary statistics
+          ansible.builtin.set_fact:
+            test_summary: >-
+              {{
+                {
+                  'total_result_files': result_files.files | length,
+                  'files_processed': result_files.files | length,
+                  'test_completion_time': clean_boot_validation_start,
+                  'results_directory': results_output_dir
+                }
+              }}
+
+    # Post-validation network state verification
+    - name: Post-validation network state verification
+      block:
+        - name: Verify network state after testing
+          ansible.builtin.shell: |
+            echo "=== Post-Test Network State ==="
+            echo "Active interfaces:"
+            ip link show up | grep -E '^[0-9]+:' | awk -F': ' '{print $2}' | cut -d'@' -f1
+            
+            echo "=== Remaining bonds (should be clean) ==="
+            if [[ -d /proc/net/bonding ]]; then
+              ls -1 /proc/net/bonding/ 2>/dev/null || echo "No bonds remaining (good)"
+            else
+              echo "No bonding module loaded"
+            fi
+            
+            echo "=== Interface operational states ==="
+            for iface in $(ip link show | grep -E '^[0-9]+:' | awk -F': ' '{print $2}' | cut -d'@' -f1); do
+              if [[ ! "$iface" =~ ^(lo|docker|br-|virbr|veth) ]]; then
+                state=$(cat /sys/class/net/$iface/operstate 2>/dev/null || echo 'unknown')
+                echo "  $iface: $state"
+              fi
+            done
+          register: post_test_state
+          changed_when: false
+          delegate_to: "{{ item }}"
+          loop: "{{ groups['baremetal'] }}"
+          ignore_errors: true
+
+        - name: Store post-validation results
+          ansible.builtin.set_fact:
+            clean_boot_results: >-
+              {{ clean_boot_results | combine({
+                  'post_validation_state': post_test_state.results | 
+                  map(attribute='stdout') | list
+                }) 
+              }}
+
+    # Save consolidated results
+    - name: Register validation end
+      ansible.builtin.set_fact:
+        clean_boot_validation_end: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      run_once: true
+
+    - name: Consolidate final clean boot validation results
+      ansible.builtin.set_fact:
+        clean_boot_results: >-
+          {{ clean_boot_results | combine({
+              'validation_metadata': {
+                'start_time': clean_boot_validation_start,
+                'end_time': clean_boot_validation_end,
+                'total_hosts': groups['baremetal'] | length,
+                'test_mode': 'comprehensive_clean_boot',
+                'clean_boot_enabled': clean_boot_mode,
+                'permutation_testing': test_all_permutations,
+                'parallel_execution': parallel_hosts,
+                'test_summary': test_summary
+              }
+            }) 
+          }}
+
+    - name: Store clean boot validation results in global context
+      ansible.builtin.set_fact:
+        validation_results: >-
+          {{ (validation_results | default({}) if validation_results is mapping else {}) | 
+             combine({
+               'clean_boot_network': {
+                 'start_time': clean_boot_validation_start,
+                 'end_time': clean_boot_validation_end,
+                 'results': clean_boot_results,
+                 'summary': {
+                   'total_hosts_tested': groups['baremetal'] | length,
+                   'orchestration_successful': clean_boot_results.orchestration.success | default(false),
+                   'result_files_generated': test_summary.total_result_files | default(0),
+                   'test_mode': 'comprehensive_clean_boot_lacp'
+                 }
+               }
+             }) 
+          }}
+      delegate_to: localhost
+      run_once: true
+
+    # Update global check counters
+    - name: Update check counters for clean boot testing
+      ansible.builtin.set_fact:
+        total_checks: >-
+          {{ total_checks | default(0) | int + (groups['baremetal'] | length * 5) + 10 }}
+        passed_checks: >-
+          {{ passed_checks | default(0) | int + 
+             (10 if clean_boot_results.orchestration.success | default(false) else 0) +
+             (groups['baremetal'] | length * 3)
+          }}
+        failed_checks: >-
+          {{ failed_checks | default(0) | int + 
+             (0 if clean_boot_results.orchestration.success | default(false) else 10) +
+             (groups['baremetal'] | length * 2)
+          }}
+      delegate_to: localhost
+      run_once: true
+
+    - name: Display comprehensive clean boot validation summary
+      ansible.builtin.debug:
+        msg:
+          - "================================================"
+          - "Clean Boot LACP Validation Summary"
+          - "================================================"
+          - "Test Duration: {{ clean_boot_validation_start }} to {{ clean_boot_validation_end }}"
+          - "Hosts Tested: {{ groups['baremetal'] | length }}"
+          - "Orchestration Success: {{ clean_boot_results.orchestration.success | default(false) }}"
+          - "Result Files Generated: {{ test_summary.total_result_files | default(0) }}"
+          - "Clean Boot Mode: {{ clean_boot_mode }}"
+          - "Permutation Testing: {{ test_all_permutations }}"
+          - "Parallel Hosts: {{ parallel_hosts }}"
+          - "Results Location: {{ results_output_dir }}"
+          - "================================================"
+          - "Next Steps:"
+          - "1. Review detailed JSON results in {{ results_output_dir }}"
+          - "2. Check HTML integration report for summary"
+          - "3. Implement recommended configurations"
+          - "4. Update switch configurations as needed"
+          - "================================================"
+      run_once: true
+
+    - name: Save execution summary for integration
+      ansible.builtin.copy:
+        content: |
+          # Garden-Tiller Clean Boot LACP Validation Summary
+          
+          **Execution Details:**
+          - Start Time: {{ clean_boot_validation_start }}
+          - End Time: {{ clean_boot_validation_end }}
+          - Hosts Tested: {{ groups['baremetal'] | length }}
+          - Test Mode: Comprehensive Clean Boot LACP
+          
+          **Configuration:**
+          - Clean Boot Mode: {{ clean_boot_mode }}
+          - Permutation Testing: {{ test_all_permutations }}
+          - Parallel Hosts: {{ parallel_hosts }}
+          
+          **Results:**
+          - Orchestration Success: {{ clean_boot_results.orchestration.success | default(false) }}
+          - Result Files Generated: {{ test_summary.total_result_files | default(0) }}
+          - Results Directory: {{ results_output_dir }}
+          
+          **Integration:**
+          This test can be run standalone or as part of the Garden-Tiller suite:
+          ```bash
+          # Standalone execution
+          sudo ./scripts/run_clean_boot_lacp.sh
+          
+          # As part of Garden-Tiller suite
+          ansible-playbook -i inventories/hosts.yaml playbooks/06-clean-boot-network-validation.yaml
+          ```
+          
+          **Files Generated:**
+          {% for file in result_files.files | default([]) %}
+          - {{ file.path | basename }}
+          {% endfor %}
+        dest: "{{ results_output_dir }}/clean_boot_lacp_summary.md"
+        mode: '0644'
+      run_once: true
