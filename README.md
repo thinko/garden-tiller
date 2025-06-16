@@ -141,17 +141,14 @@ Run HPE-specific validations with:
 
 ## Testing BMC Connectivity
 
-You can use the included test script to verify connectivity to Dell iDRAC or HPE iLO directly:
+BMC connectivity can be tested using the standard playbooks:
 
 ```bash
-# Test Dell iDRAC connection
-./scripts/test_bmc_utils.py --type idrac --ip 192.168.10.101 --username root --password calvin
-
-# Test HPE iLO connection
-./scripts/test_bmc_utils.py --type ilo --ip 192.168.10.102 --username Administrator --password password
+# Test OOBM connectivity for all hosts
+ansible-playbook -i inventories/hosts.yaml playbooks/01-validate-oobm.yaml
 ```
 
-This can help debug connectivity issues before running the full validation suite.
+This validates BMC connectivity before running the full validation suite.
 
 ## Containerized Execution
 

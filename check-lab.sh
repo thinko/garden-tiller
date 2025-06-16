@@ -159,7 +159,7 @@ fi
 EXIT_CODE=$?
 if [ $EXIT_CODE -eq 0 ]; then
     echo -e "${GREEN}Validation completed successfully!${NC}"
-    echo -e "${GREEN}Check the report at ./reports/lab-report-$(date +%Y%m%d).html${NC}"
+    echo -e "${GREEN}Check the report at ./reports/lab-report-$(date +%Y%m%d_%H%M%S).html${NC}"
 else
     echo -e "${RED}Validation failed with exit code ${EXIT_CODE}${NC}"
     echo -e "${RED}Please check the log file for details: ${LOG_FILE}${NC}"

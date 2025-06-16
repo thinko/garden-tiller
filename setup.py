@@ -10,13 +10,13 @@ with open("requirements.txt", "r") as f:
 
 setup(
     name="garden-tiller",
-    version="0.1.0",
-    author="Your Name",
-    author_email="your.email@example.com",
-    description="A validation suite for OpenShift lab environments",
+    version="0.2.0",
+    author="thinko",
+    author_email="ahandy@gmail.com",
+    description="A validation suite for OpenShift environments",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/garden-tiller",
+    url="https://github.com/thinko/garden-tiller",
     packages=find_packages(),
     include_package_data=True,
     classifiers=[
