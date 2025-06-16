@@ -1,0 +1,50 @@
+# SSH Configuration for Garden-Tiller Lab Validation
+# Handles legacy HPE iLO4 systems and other BMC connections
+
+# Global settings for lab environment
+Host *
+    # Security settings for lab environment  
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    LogLevel ERROR
+    
+    # Connection optimizations
+    ControlMaster auto
+    ControlPath /tmp/.ssh-control-%h-%p-%r
+    ControlPersist 60s
+    
+    # Timeouts
+    ConnectTimeout 30
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+
+# HPE iLO4 systems (legacy SSH support)
+Host 10.9.1.* *.ilo.* *ilo* *hpe*
+    # Legacy key exchange methods for iLO4
+    KexAlgorithms +diffie-hellman-group14-sha1,diffie-hellman-group1-sha1
+    PubkeyAcceptedKeyTypes +ssh-rsa
+    HostKeyAlgorithms +ssh-rsa
+    
+    # Cipher support for older systems
+    Ciphers +aes128-cbc,aes192-cbc,aes256-cbc
+    MACs +hmac-sha1,hmac-sha2-256,hmac-sha2-512
+    
+    # iLO-specific settings
+    PreferredAuthentications password,keyboard-interactive
+    PubkeyAuthentication no
+    PasswordAuthentication yes
+
+# Dell iDRAC systems
+Host *.idrac.* *idrac* *dell*
+    # Modern key exchange for newer iDRAC versions
+    KexAlgorithms diffie-hellman-group14-sha256,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521
+    PubkeyAcceptedKeyTypes ssh-rsa,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,ssh-ed25519
+    HostKeyAlgorithms ssh-rsa,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,ssh-ed25519
+
+# Generic BMC/IPMI systems
+Host *.bmc.* *bmc*
+    # Broader compatibility for unknown BMC types
+    KexAlgorithms +diffie-hellman-group14-sha1,diffie-hellman-group1-sha1,diffie-hellman-group14-sha256
+    PubkeyAcceptedKeyTypes +ssh-rsa,ssh-dss
+    HostKeyAlgorithms +ssh-rsa,ssh-dss
+    Ciphers +aes128-cbc,aes192-cbc,aes256-cbc,3des-cbc

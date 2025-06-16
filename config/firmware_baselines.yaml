@@ -1,0 +1,188 @@
+# Garden-Tiller Firmware Baseline Configuration
+# Defines minimum and recommended firmware versions for validation
+
+firmware_baselines:
+  # Dell Server Firmware Baselines
+  Dell:
+  - name: "BMC"
+    type: "BMC"
+    minimum_version: "4.40.00.00"
+    recommended_version: "5.10.00.00"
+    critical: true
+    description: "Dell iDRAC firmware"
+    vulnerabilities_fixed:
+    - "CVE-2021-21514"
+    - "CVE-2022-26872"
+
+  - name: "BIOS"
+    type: "BIOS"
+    minimum_version: "2.8.0"
+    recommended_version: "2.15.0"
+    critical: true
+    description: "Dell PowerEdge BIOS"
+    security_features:
+    - "Secure Boot"
+    - "TPM 2.0"
+
+  - name: "NIC"
+    type: "NIC"
+    minimum_version: "20.0.17"
+    recommended_version: "21.80.9"
+    critical: false
+    description: "Intel X710 NIC firmware"
+    models:
+    - "X710"
+    - "X722"
+
+  - name: "RAID"
+    type: "RAID"
+    minimum_version: "25.5.8.0001"
+    recommended_version: "25.5.9.0018"
+    critical: false
+    description: "Dell PERC H740P RAID Controller"
+    models:
+    - "H740P"
+    - "H750"
+
+  # HPE Server Firmware Baselines  
+  HPE:
+  - name: "BMC"
+    type: "BMC"
+    minimum_version: "2.75"
+    recommended_version: "2.82"
+    critical: true
+    description: "HPE iLO 5 firmware"
+    vulnerabilities_fixed:
+    - "CVE-2021-29210"
+    - "CVE-2022-23703"
+
+  - name: "BIOS"
+    type: "BIOS"
+    minimum_version: "U30"
+    recommended_version: "U46"
+    critical: true
+    description: "HPE ProLiant Gen10 BIOS"
+    security_features:
+    - "Secure Boot"
+    - "Silicon Root of Trust"
+
+  - name: "NIC"
+    type: "NIC"
+    minimum_version: "20.0.17"
+    recommended_version: "21.80.9"
+    critical: false
+    description: "Intel X710 NIC firmware"
+    models:
+    - "X710"
+    - "X722"
+
+  - name: "RAID"
+    type: "RAID"
+    minimum_version: "6.706.06.00"
+    recommended_version: "6.708.18.00"
+    critical: false
+    description: "HPE Smart Array P408i"
+    models:
+    - "P408i"
+    - "P816i"
+
+  # Generic/Supermicro Baselines
+  Supermicro:
+  - name: "BMC"
+    type: "BMC"
+    minimum_version: "1.66.10"
+    recommended_version: "1.73.10"
+    critical: true
+    description: "Supermicro BMC firmware"
+
+  - name: "BIOS"
+    type: "BIOS"
+    minimum_version: "3.1"
+    recommended_version: "3.4"
+    critical: true
+    description: "Supermicro X11 series BIOS"
+
+# Firmware update settings
+update_settings:
+  # Only update if below minimum (critical updates)
+  critical_updates_only: true
+
+  # Schedule updates during maintenance windows
+  maintenance_window:
+    enabled: true
+    start_hour: 2 # 2 AM
+    end_hour: 5 # 5 AM
+    timezone: "UTC"
+
+  # Automatic rollback settings
+  rollback:
+    enabled: true
+    timeout_minutes: 30
+    health_check_retries: 3
+
+  # Update verification
+  verification:
+    post_update_wait_seconds: 300
+    health_check_commands:
+    - "ipmitool power status"
+    - "systemctl is-active sshd"
+
+  # Backup settings
+  backup:
+    create_backup: true
+    backup_location: "/tmp/firmware_backups"
+    retention_days: 30
+
+# Compliance reporting
+compliance:
+  # Generate compliance reports
+  generate_reports: true
+
+  # Report formats
+  report_formats:
+  - "html"
+  - "json"
+  - "csv"
+
+  # Compliance thresholds
+  thresholds:
+    critical_compliance: 100 # 100% of critical components must be compliant
+    overall_compliance: 95 # 95% overall compliance target
+
+  # Notification settings
+  notifications:
+    enabled: true
+    email_recipients:
+    - "admin@example.com"
+    - "security@example.com"
+    slack_webhook: "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
+
+# Security settings
+security:
+  # Firmware signature verification
+  verify_signatures: true
+
+  # Only download from trusted sources
+  trusted_sources:
+  - "downloads.dell.com"
+  - "support.hpe.com"
+  - "ftp.supermicro.com"
+
+  # Checksum verification
+  verify_checksums: true
+
+  # Secure download (HTTPS only)
+  https_only: true
+
+# Performance settings
+performance:
+  # Parallel updates
+  max_concurrent_updates: 3
+
+  # Timeout settings
+  download_timeout_seconds: 1800 # 30 minutes
+  update_timeout_seconds: 3600 # 1 hour
+
+  # Retry settings
+  max_retries: 3
+  retry_delay_seconds: 60
