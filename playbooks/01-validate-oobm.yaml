@@ -21,6 +21,14 @@
         oobm_validation_start: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
       run_once: true
 
+    - name: Initialize check counters for standalone execution
+      ansible.builtin.set_fact:
+        total_checks: "{{ total_checks | default(0) }}"
+        passed_checks: "{{ passed_checks | default(0) }}"
+        failed_checks: "{{ failed_checks | default(0) }}"
+        warning_checks: "{{ warning_checks | default(0) }}"
+      run_once: true
+
     - name: Set up result dictionary for OOBM validation
       ansible.builtin.set_fact:
         oobm_results: {}
@@ -39,7 +47,7 @@
             cmd: "ping -c 3 {{ hostvars[item]['bmc_address'] }}"
           loop: "{{ groups['baremetal'] }}"
           register: bmc_ping_results
-          changed_when: my_output.rc != 0
+          changed_when: false
           ignore_errors: true
 
         - name: Analyze BMC ping results
@@ -151,8 +159,8 @@
           -U {{ hostvars[item]['bmc_username'] }} -P {{ hostvars[item]['bmc_password'] }} mc info"
       loop: "{{ groups['baremetal'] }}"
       register: bmc_firmware_results
-      changed_when: bmc_firmware_results.rc != 0
-      ignore_errors: true
+      changed_when: false
+      failed_when: false  # Ignore channel cipher suite errors
 
     # Skip OOBM validation for now since we're having issues with variable handling
     # We'll use a direct approach to get the job done
@@ -175,13 +183,18 @@
     - name: Store OOBM validation results
       ansible.builtin.set_fact:
         validation_results: >-
-          "{{ validation_results | default({}) | combine({'oobm': {
-            'start_time': oobm_validation_start, 'end_time': oobm_validation_end, 'results': oobm_results,
-            'summary': {'total': groups['baremetal'] | length, 'reachable': oobm_results |
-               dict2items | selectattr('value.connectivity', 'defined') | selectattr('value.connectivity') |
-               list | length, 'service_ok': oobm_results | dict2items |
-               selectattr('value.service_check', 'defined') | selectattr('value.service_check') |
-               list | length}}}) }}"
+          {{ validation_results | default({}) | combine({
+            'oobm': {
+              'start_time': oobm_validation_start,
+              'end_time': oobm_validation_end,
+              'results': oobm_results,
+              'summary': {
+                'total': groups['baremetal'] | length,
+                'reachable': (oobm_results | dict2items | selectattr('value.connectivity', 'defined') | selectattr('value.connectivity') | list | length) if oobm_results is mapping else 0,
+                'service_ok': (oobm_results | dict2items | selectattr('value.service_check', 'defined') | selectattr('value.service_check') | list | length) if oobm_results is mapping else 0
+              }
+            }
+          }) }}
       delegate_to: localhost
       run_once: true
 
@@ -191,26 +204,14 @@
         total_checks: "{{ total_checks | int + (groups['baremetal'] | length * 2) }}"
         passed_checks: >-
           {{ passed_checks | int +
-             (oobm_results | dict2items |
-              selectattr('value.connectivity', 'defined') |
-              selectattr('value.connectivity') |
-              list | length) +
-             (oobm_results | dict2items |
-              selectattr('value.service_check', 'defined') |
-              selectattr('value.service_check') |
-              list | length)
+             ((oobm_results | dict2items | selectattr('value.connectivity', 'defined') | selectattr('value.connectivity') | list | length) if oobm_results is mapping else 0) +
+             ((oobm_results | dict2items | selectattr('value.service_check', 'defined') | selectattr('value.service_check') | list | length) if oobm_results is mapping else 0)
           }}
         failed_checks: >-
           {{ failed_checks | int +
              ((groups['baremetal'] | length * 2) -
-              (oobm_results | dict2items |
-               selectattr('value.connectivity', 'defined') |
-               selectattr('value.connectivity') |
-               list | length) -
-              (oobm_results | dict2items |
-               selectattr('value.service_check', 'defined') |
-               selectattr('value.service_check') |
-               list | length))
+              ((oobm_results | dict2items | selectattr('value.connectivity', 'defined') | selectattr('value.connectivity') | list | length) if oobm_results is mapping else 0) -
+              ((oobm_results | dict2items | selectattr('value.service_check', 'defined') | selectattr('value.service_check') | list | length) if oobm_results is mapping else 0))
           }}
       delegate_to: localhost
       run_once: true

@@ -17,7 +17,7 @@
     - name: Set validation start time
       ansible.builtin.set_fact:
         validation_start_time: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
-        report_file: "{{ playbook_dir }}/../reports/lab-report-{{ lookup('pipe', 'date +%Y%m%d') }}.html"
+        report_file: "{{ playbook_dir }}/../reports/lab-report-{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}.html"
 
     - name: Initialize validation results dictionary
       ansible.builtin.set_fact:

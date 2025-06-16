@@ -29,28 +29,134 @@
     - name: Process HPE hosts
       when: groups['baremetal'] | map('extract', hostvars) | selectattr('bmc_type', 'equalto', 'ilo') | map(attribute='inventory_hostname') | list | length > 0
 
-      # Process Dell hosts for MAC validation 
+      # Process Dell hosts for MAC validation
       block:
         - name: Get MAC addresses from iLO (HPE)
           ansible.builtin.shell: >
-            python3 {{ playbook_dir }}/../library/ilo_utils.py  {{ hostvars[item].bmc_address }}  {{ hostvars[item].bmc_username }}  {{ hostvars[item].bmc_password
-            }}
-            --ribcl
+            python3 {{ playbook_dir }}/../library/ilo_utils.py {{ hostvars[item].bmc_address }}
+            {{ hostvars[item].bmc_username }} {{ hostvars[item].bmc_password }} --ribcl
           args:
             executable: /bin/bash
           register: ilo_info_results
-          loop: "{{ groups['baremetal'] | map('extract', hostvars) | selectattr('bmc_type', 'equalto', 'ilo') | map(attribute='inventory_hostname') | list }}"
+          loop: "{{ groups['baremetal'] | map('extract', hostvars) | selectattr('bmc_type', 'equalto', 'ilo') |
+            map(attribute='inventory_hostname') | list }}"
           ignore_errors: true
 
-        - name: Process iLO info results for MAC addresses
+        - name: Process iLO info results for MAC addresses with enhanced network details
           ansible.builtin.set_fact:
-            mac_results: "{{ (mac_results | default({}) if mac_results is mapping else {}) | combine({(item.item | string): {'success': item.rc is defined and item.rc
-              == 0, 'interfaces': {}, 'interface_count': 0, 'invalid_count': 0, 'data_source': 'oob', 'start_time': mac_validation_start, 'end_time': lookup('pipe',
-              'date +%Y-%m-%d\\ %H:%M:%S')}}) }}"
+            mac_results: >-
+              {% set current_results = mac_results | default({}) if mac_results is mapping else {} %}
+              {% set hostname = item.item | string %}
+              {% set raw_stdout = item.stdout | default('') %}
+              {% set raw_stderr = item.stderr | default('') %}
+              {% set failed = item.failed | default(false) %}
+              {% set rc = item.rc | default(-1) %}
+              
+              {% if not failed and rc == 0 and raw_stdout %}
+                {% set parsed_stdout = raw_stdout | from_json %}
+                {% set interfaces_data = {} %}
+                {% set interface_list = parsed_stdout.network_adapters | default([]) %}
+                
+                {% for iface in interface_list %}
+                  {% set interface_name = iface.name | default(iface.id | default('iface_' + loop.index|string)) %}
+                  {% set mac_addr = 'N/A' %}
+                  
+                  {# Try multiple ways to get MAC address #}
+                  {% if iface.mac_address is defined and iface.mac_address != '' %}
+                    {% set mac_addr = iface.mac_address %}
+                  {% elif iface.AssociatedNetworkAddresses is defined and iface.AssociatedNetworkAddresses is iterable and iface.AssociatedNetworkAddresses|length > 0 %}
+                    {% set mac_addr = iface.AssociatedNetworkAddresses[0] %}
+                  {% elif iface.MacAddress is defined %}
+                    {% set mac_addr = iface.MacAddress %}
+                  {% elif iface.PhysicalAddress is defined %}
+                    {% set mac_addr = iface.PhysicalAddress %}
+                  {% endif %}
+                  
+                  {% set interface_info = {
+                    'mac_address': mac_addr,
+                    'port_number': iface.port | default(iface.PhysicalPortNumber | default(iface.PortNumber | default('N/A'))),
+                    'link_status': iface.link_status | default(iface.LinkStatus | default('Unknown')),
+                    'speed_mbps': iface.speed_mbps | default(iface.CurrentLinkSpeedMbps | default(iface.SpeedMbps | default(0))),
+                    'full_duplex': iface.full_duplex | default(iface.FullDuplex | default(false)),
+                    'interface_type': iface.Description | default(iface.InterfaceType | default('Unknown')),
+                    'pcie_device_id': iface.Id | default(iface.DeviceId | default('Unknown')),
+                    'pcie_slot': iface.Location | default(iface.SlotNumber | default('Unknown')),
+                    'manufacturer': iface.Manufacturer | default('Unknown'),
+                    'model': iface.Model | default(iface.PartNumber | default('Unknown')),
+                    'serial_number': iface.SerialNumber | default('Unknown'),
+                    'firmware_version': iface.FirmwareVersion | default('Unknown'),
+                    'driver_version': iface.DriverVersion | default('Unknown'),
+                    'auto_negotiation': iface.AutoNegotiation | default('Unknown'),
+                    'wake_on_lan': iface.WakeOnLan | default('Unknown'),
+                    'vlan_enabled': iface.VLANEnabled | default(false),
+                    'max_frame_size': iface.MaxFrameSize | default(0),
+                    'link_technology': iface.LinkTechnology | default('Unknown'),
+                    'supported_speeds': iface.SupportedSpeeds | default([]),
+                    'capabilities': iface.Capabilities | default([])
+                  } %}
+                  {% set interfaces_data = interfaces_data | combine({interface_name: interface_info}) %}
+                {% endfor %}
+                
+                {% set valid_macs = interfaces_data | dict2items | selectattr('value.mac_address', 'match', '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$') | list %}
+                {% set total_interfaces = interfaces_data | length %}
+                {% set valid_mac_count = valid_macs | length %}
+                {% set interfaces_with_link = interfaces_data | dict2items | selectattr('value.link_status', 'equalto', 'Up') | list | length %}
+                
+                {% set host_entry = {
+                  hostname: {
+                    'success': true,
+                    'connection_status': 'success',
+                    'interfaces': interfaces_data,
+                    'interface_count': total_interfaces,
+                    'valid_mac_count': valid_mac_count,
+                    'invalid_mac_count': total_interfaces - valid_mac_count,
+                    'interfaces_with_link': interfaces_with_link,
+                    'data_source': 'ilo_oob',
+                    'collection_timestamp': ansible_date_time.iso8601,
+                    'bmc_address': hostvars[hostname].bmc_address | default('Unknown'),
+                    'validation_status': 'pass' if valid_mac_count > 0 else 'warn',
+                    'network_summary': {
+                      'total_ports': total_interfaces,
+                      'active_links': interfaces_with_link,
+                      'valid_macs': valid_mac_count,
+                      'gigabit_ports': interfaces_data | dict2items | selectattr('value.speed_mbps', 'ge', 1000) | list | length,
+                      'ten_gigabit_ports': interfaces_data | dict2items | selectattr('value.speed_mbps', 'ge', 10000) | list | length
+                    }
+                  }
+                } %}
+              {% else %}
+                {% set error_msg = raw_stderr | default('Command failed') %}
+                {% set host_entry = {
+                  hostname: {
+                    'success': false,
+                    'connection_status': 'failed',
+                    'error_details': error_msg,
+                    'interfaces': {},
+                    'interface_count': 0,
+                    'valid_mac_count': 0,
+                    'invalid_mac_count': 0,
+                    'interfaces_with_link': 0,
+                    'data_source': 'ilo_oob',
+                    'collection_timestamp': ansible_date_time.iso8601,
+                    'bmc_address': hostvars[hostname].bmc_address | default('Unknown'),
+                    'validation_status': 'fail',
+                    'network_summary': {
+                      'total_ports': 0,
+                      'active_links': 0,
+                      'valid_macs': 0,
+                      'gigabit_ports': 0,
+                      'ten_gigabit_ports': 0
+                    }
+                  }
+                } %}
+              {% endif %}
+              
+              {{ current_results | combine(host_entry) }}
           loop: "{{ ilo_info_results.results }}"
-          when: item.rc is defined and item.rc == 0 and (mac_results is not string)
+          when: ilo_info_results is defined and mac_results is not string # Process all results, even failures
     - name: Process Dell hosts
-      when: groups['baremetal'] | map('extract', hostvars) | selectattr('bmc_type', 'equalto', 'idrac') | map(attribute='inventory_hostname') | list | length > 0
+      when: groups['baremetal'] | map('extract', hostvars) | selectattr('bmc_type', 'equalto', 'idrac') |
+        map(attribute='inventory_hostname') | list | length > 0
 
       # Calculate validation statistics
       block:
@@ -64,49 +170,115 @@
           loop: "{{ groups['baremetal'] | map('extract', hostvars) | selectattr('bmc_type', 'equalto', 'idrac') | map(attribute='inventory_hostname') | list }}"
           ignore_errors: true
 
-        - name: Process iDRAC info results for MAC addresses
+        - name: Process iDRAC info results for MAC addresses # Enhanced to robustly parse network data
           ansible.builtin.set_fact:
-            mac_results: "{{ (mac_results | default({}) if mac_results is mapping else {}) | combine({(item.item | string): {'success': item.rc is defined and item.rc
-              == 0, 'interfaces': {}, 'interface_count': 0, 'invalid_count': 0, 'data_source': 'oob', 'start_time': mac_validation_start, 'end_time': lookup('pipe',
-              'date +%Y-%m-%d\\ %H:%M:%S')}}) }}"
+            mac_results: >-
+              {% set current_results = mac_results | default({}) if mac_results is mapping else {} %}
+              {% set hostname = item.item | string %}
+              {% set raw_stdout = item.stdout | default('') %}
+              {% set failed = item.failed | default(false) %}
+              {% set rc = item.rc | default(-1) %}
+              
+              {% if not failed and rc == 0 and raw_stdout %}
+                {% set parsed_stdout = raw_stdout | from_json %}
+                {% set interfaces_data = {} %}
+                {% set interface_list = parsed_stdout.network_devices | default([]) %}
+                
+                {% for iface in interface_list %}
+                  {% set interface_name = iface.name | default(iface.id | default('iface_' + loop.index|string)) %}
+                  {% set mac_addr = iface.mac_address | default('N/A') %}
+                  {% set interface_info = {
+                    'mac_address': mac_addr,
+                    'port_number': iface.port | default(iface.PhysicalPortNumber | default('N/A')),
+                    'link_status': iface.link_status | default('Unknown'),
+                    'speed_mbps': iface.speed_mbps | default(0),
+                    'full_duplex': iface.full_duplex | default(false),
+                    'interface_type': iface.description | default(iface.Description | default('Unknown')),
+                    'device_id': iface.id | default('Unknown')
+                  } %}
+                  {% set interfaces_data = interfaces_data | combine({interface_name: interface_info}) %}
+                {% endfor %}
+                
+                {% set valid_macs = interfaces_data | dict2items | selectattr('value.mac_address', 'match', '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$') | list %}
+                
+                {% set host_entry = {
+                  hostname: {
+                    'success': true,
+                    'connection_status': 'success',
+                    'interfaces': interfaces_data,
+                    'interface_count': interfaces_data | length,
+                    'valid_mac_count': valid_macs | length,
+                    'invalid_mac_count': (interfaces_data | length) - (valid_macs | length),
+                    'data_source': 'idrac_oob',
+                    'collection_timestamp': ansible_date_time.iso8601,
+                    'bmc_address': hostvars[hostname].bmc_address | default('Unknown'),
+                    'validation_status': 'pass' if valid_macs | length > 0 else 'warn'
+                  }
+                } %}
+              {% else %}
+                {% set error_msg = item.stderr | default('Command failed') %}
+                {% set host_entry = {
+                  hostname: {
+                    'success': false,
+                    'connection_status': 'failed',
+                    'error_details': error_msg,
+                    'interfaces': {},
+                    'interface_count': 0,
+                    'valid_mac_count': 0,
+                    'invalid_mac_count': 0,
+                    'data_source': 'idrac_oob',
+                    'collection_timestamp': ansible_date_time.iso8601,
+                    'bmc_address': hostvars[hostname].bmc_address | default('Unknown'),
+                    'validation_status': 'fail'
+                  }
+                } %}
+              {% endif %}
+              
+              {{ current_results | combine(host_entry) }}
           loop: "{{ idrac_info_results.results }}"
-          when: item.rc is defined and item.rc == 0 and (mac_results is not string)
+          when: idrac_info_results is defined and mac_results is not string # Process all results, even failures
+
+    # Calculate validation statistics
+    - name: Calculate MAC validation statistics
+      ansible.builtin.set_fact:
+    # Calculate validation statistics
     - name: Calculate MAC validation statistics
       ansible.builtin.set_fact:
         mac_stats: >
           {% set mac_res = mac_results | default({}) if mac_results is mapping else {} %}
           {
-            "success_count": mac_res | dict2items | selectattr('value.success', 'equalto', true) | list | length,
-            "total_interface_count": mac_res | dict2items | sum(attribute='value.interface_count') | default(0),
-            "total_invalid_count": mac_res | dict2items | sum(attribute='value.invalid_count') | default(0),
-            "direct_source_count": mac_res | dict2items | selectattr('value.data_source', 'equalto', 'direct') | list | length,
-            "oob_source_count": mac_res | dict2items | selectattr('value.data_source', 'equalto', 'oob') | list | length
+            "success_count": (mac_res | dict2items | selectattr('value.success', 'equalto', true) | list | length) if mac_res is mapping else 0,
+            "total_hosts": (mac_res | dict2items | list | length) if mac_res is mapping else 0,
+            "total_interface_count": (mac_res | dict2items | map(attribute='value.interface_count') | sum) if mac_res is mapping else 0,
+            "total_valid_mac_count": (mac_res | dict2items | map(attribute='value.valid_mac_count') | sum) if mac_res is mapping else 0,
+            "total_invalid_mac_count": (mac_res | dict2items | map(attribute='value.invalid_mac_count') | sum) if mac_res is mapping else 0,
+            "connection_failed_count": (mac_res | dict2items | selectattr('value.success', 'equalto', false) | list | length) if mac_res is mapping else 0
           }
       run_once: true
 
     - name: Set calculated statistics variables
       ansible.builtin.set_fact:
-        success_count: "{{ mac_stats.success_count | int }}"
-        total_interface_count: "{{ mac_stats.total_interface_count | int }}"
-        total_invalid_count: "{{ mac_stats.total_invalid_count | int }}"
-        direct_source_count: "{{ mac_stats.direct_source_count | int }}"
-        oob_source_count: "{{ mac_stats.oob_source_count | int }}"
-        success_int: "{{ mac_stats.success_count | int }}"
+        mac_success_count: "{{ mac_stats.success_count }}"
+        mac_total_hosts: "{{ mac_stats.total_hosts }}"
+        mac_total_interfaces: "{{ mac_stats.total_interface_count }}"
+        mac_valid_macs: "{{ mac_stats.total_valid_mac_count }}"
+        mac_invalid_macs: "{{ mac_stats.total_invalid_mac_count }}"
+        mac_failed_connections: "{{ mac_stats.connection_failed_count }}"
       run_once: true
 
     - name: Display MAC validation summary
       ansible.builtin.debug:
         msg:
           - "MAC Address Validation Summary:"
-          - "Total hosts: {{ groups['baremetal'] | length }}"
-          - "Successful validations: {{ success_count }}"
-          - "Direct access validations: {{ direct_source_count }}"
-          - "OOB management validations: {{ oob_source_count }}"
-          - "Total valid interfaces discovered: {{ total_interface_count }}"
-          - "Total invalid interfaces: {{ total_invalid_count }}"
+          - "Total hosts: {{ mac_total_hosts }}"
+          - "Successful validations: {{ mac_success_count }}"
+          - "Total valid interfaces discovered: {{ mac_total_interfaces }}"
+          - "Total valid MAC addresses: {{ mac_valid_macs }}"
+          - "Total invalid MAC addresses: {{ mac_invalid_macs }}"
+          - "Connection failures: {{ mac_failed_connections }}"
       run_once: true
 
-    # Save validation results 
+    # Save validation results
     - name: Register validation end
       ansible.builtin.set_fact:
         mac_validation_end: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"

@@ -5,7 +5,7 @@
 - name: Verify HPE iLO configuration and details
   hosts: localhost
   connection: local
-  gather_facts: false
+  gather_facts: true
   tags: [oobm, hpe, ilo, all]
   vars:
     structlog_level: info
@@ -22,7 +22,14 @@
 
     - name: Set up result dictionary for HPE iLO validation
       ansible.builtin.set_fact:
-        hpe_oobm_results: "{{ hpe_oobm_results | default({}) if hpe_oobm_results is mapping else {} }}"
+        hpe_oobm_results: {}
+      run_once: true
+
+    - name: Debug - Verify hpe_oobm_results initialization
+      ansible.builtin.debug:
+        msg:
+          - "hpe_oobm_results type: {{ hpe_oobm_results | type_debug }}"
+          - "hpe_oobm_results value: {{ hpe_oobm_results }}"
       run_once: true
 
     - name: Configure Structlog logger for HPE iLO validation
@@ -46,152 +53,278 @@
         msg: "Found {{ hpe_hosts | length }} HPE iLO host(s) to validate"
       run_once: true
 
-    # Collect HPE iLO information using our Python module
+    # Collect HPE iLO information using our Python module with robust error handling
     - name: Collect detailed iLO information
       block:
-        - name: Run iLO info collection script
+        - name: Run iLO info collection script with stderr filtering
           ansible.builtin.shell: >
             python3 {{ playbook_dir }}/../library/ilo_utils.py  {{ hostvars[item].bmc_address }}
             {{ hostvars[item].bmc_username }}
             {{ hostvars[item].bmc_password }}
-            --ribcl
+            --ribcl 2>/dev/null || echo '{"error": "collection_failed", "details": "See stderr for details"}'
           args:
             executable: /bin/bash
           register: ilo_info_results
           loop: "{{ hpe_hosts }}"
           ignore_errors: true
 
-        - name: Process iLO info results
-          ansible.builtin.set_fact:
-            hpe_oobm_results: "{{ (hpe_oobm_results | default({}) if hpe_oobm_results is mapping else {}) | combine({(item.item | string): {'success': not item.failed,
-              'info': (item.stdout | from_json) if not item.failed else {}, 'error': item.stderr if item.failed else ''}}) }}"
-          loop: "{{ ilo_info_results.results }}"
+        - name: Process iLO info results using Python helper
+          ansible.builtin.shell: >
+            python3 {{ playbook_dir }}/../library/process_ilo_results.py 
+            '{{ ilo_info_results.results | to_json }}'
+            '{{ hostvars | to_json }}'
+          register: processed_ilo_results
           failed_when: false
+
+        - name: Parse processed iLO results
+          ansible.builtin.set_fact:
+            hpe_oobm_results: "{{ processed_ilo_results.stdout | from_json }}"
+          when: processed_ilo_results.rc == 0
+
+        - name: Handle processing failure
+          ansible.builtin.set_fact:
+            hpe_oobm_results: {}
+          when: processed_ilo_results.rc != 0
       rescue:
-        - name: Log iLO info collection failures
+        - name: Handle complete iLO collection failure
+          ansible.builtin.set_fact:
+            hpe_oobm_results: "{{ hpe_oobm_results | default({}) }}"
+
+        - name: Populate failed host entries
+          ansible.builtin.set_fact:
+            hpe_oobm_results: >-
+              {{ hpe_oobm_results | combine({
+                item: {
+                  'connection_status': 'failed',
+                  'server_details': {
+                    'product_name': 'Collection Error',
+                    'host_uuid': 'Collection Error',
+                    'power_status': 'Collection Error',
+                    'firmware_version': 'Collection Error'
+                  },
+                  'health_status': {
+                    'system_health': 'Collection Error',
+                    'processor': 'Collection Error',
+                    'memory': 'Collection Error',
+                    'storage': 'Collection Error'
+                  },
+                  'boot_settings': {
+                    'one_time_boot': 'Collection Error',
+                    'persistent_boot': 'Collection Error'
+                  },
+                  'network_adapters': [],
+                  'network_summary': {
+                    'adapter_count': 0,
+                    'adapters_with_mac': 0
+                  },
+                  'collection_timestamp': ansible_date_time.iso8601,
+                  'bmc_address': hostvars[item].bmc_address | default('Unknown'),
+                  'bmc_type': hostvars[item].bmc_type | default('ilo'),
+                  'hostname': item,
+                  'error_details': {
+                    'message': 'Complete collection failure in rescue block',
+                    'exit_code': -1,
+                    'stdout_preview': '',
+                    'stderr_preview': '',
+                    'parsed_error': 'ansible_rescue_block'
+                  }
+                }
+              }) }}
+          loop: "{{ hpe_hosts }}"
+
+        - name: Log complete iLO info collection failure
           ansible.builtin.debug:
-            msg: "Failed to collect iLO information for some hosts - check individual results"
+            msg: "Complete failure in iLO collection - populated error entries for all HPE hosts"
           run_once: true
+
+    # Debug: Show current hpe_oobm_results structure
+    - name: Debug - Show hpe_oobm_results structure
+      ansible.builtin.debug:
+        msg: 
+          - "hpe_oobm_results keys: {{ hpe_oobm_results.keys() | list if hpe_oobm_results is mapping else 'Not a dictionary' }}"
+          - "hpe_hosts: {{ hpe_hosts }}"
+          - "hpe_oobm_results type: {{ hpe_oobm_results | type_debug }}"
+      run_once: true
 
     # Validate server power status
     - name: Validate server power status
       ansible.builtin.set_fact:
-        hpe_oobm_results: >
-          {% set node_results = hpe_oobm_results | default({}) if hpe_oobm_results is mapping else {} %}
-          {% set node = item | string %}
-          {% set current = node_results[node] | default({}) if node in node_results and node_results[node] is mapping else {} %}
-          {% if current.success | default(false) %}
-            {% set updated = current | combine({
-                'power_status': {
-                  'valid': true,
-                  'value': current.info.power_status | default('Unknown')
-                }
-              })
-            %}
-            {{ node_results | combine({node: updated}) }}
-          {% else %}
-            {{ node_results }}
-          {% endif %}
+        hpe_oobm_results: "{{ hpe_oobm_results | combine({
+            item: (hpe_oobm_results[item] | default({}) | combine({
+              'power_validation': {
+                'status': 'pass' if (hpe_oobm_results[item] | default({})).get('server_details', {}).get('power_status', 'Unknown') in ['ON', 'OFF'] else 'warn',
+                'value': (hpe_oobm_results[item] | default({})).get('server_details', {}).get('power_status', 'Unknown'),
+                'message': 'Power status available' if (hpe_oobm_results[item] | default({})).get('server_details', {}).get('power_status', 'Unknown') in ['ON', 'OFF'] else 'Power status unknown or invalid',
+                'expected': 'ON or OFF',
+                'validation_timestamp': ansible_date_time.iso8601
+              }
+            }))
+          }) }}"
       loop: "{{ hpe_hosts }}"
+      when: item in hpe_oobm_results
 
     # Validate firmware version
     - name: Validate firmware version
       ansible.builtin.set_fact:
-        hpe_oobm_results: >
-          {% set node_results = hpe_oobm_results | default({}) if hpe_oobm_results is mapping else {} %}
-          {% set node = item | string %}
-          {% set current = node_results[node] | default({}) if node in node_results and node_results[node] is mapping else {} %}
-          {% if current.success | default(false) %}
-            {% set min_version = hostvars[item].min_ilo_firmware | default('2.0') %}
-            {% set current_version = current.info.firmware_version | default('Unknown') %}
-            {% set is_valid = current_version is version(min_version, '>=') %}
-            {% set updated = current | combine({
-                'firmware': {
-                  'valid': is_valid,
-                  'current': current_version,
-                  'minimum': min_version
-                }
-              })
-            %}
-            {{ node_results | combine({node: updated}) }}
-          {% else %}
-            {{ node_results }}
-          {% endif %}
+        hpe_oobm_results: "{{ hpe_oobm_results | combine({
+            item: (hpe_oobm_results[item] | default({}) | combine({
+              'firmware_validation': {
+                'status': 'pass' if ((hpe_oobm_results[item] | default({})).get('server_details', {}).get('firmware_version', 'Unknown') != 'Unknown' and 'Unknown' not in (hpe_oobm_results[item] | default({})).get('server_details', {}).get('firmware_version', 'Unknown')) else 'warn',
+                'current_version': (hpe_oobm_results[item] | default({})).get('server_details', {}).get('firmware_version', 'Unknown'),
+                'minimum_version': (hostvars[item].min_ilo_firmware | default('2.0')) if item in hostvars else '2.0',
+                'message': 'Firmware version detected' if ((hpe_oobm_results[item] | default({})).get('server_details', {}).get('firmware_version', 'Unknown') != 'Unknown' and 'Unknown' not in (hpe_oobm_results[item] | default({})).get('server_details', {}).get('firmware_version', 'Unknown')) else 'Firmware version unavailable',
+                'validation_timestamp': ansible_date_time.iso8601
+              }
+            }))
+          }) }}"
       loop: "{{ hpe_hosts }}"
+      when: item in hpe_oobm_results
 
     # Validate health status
     - name: Validate server health status
       ansible.builtin.set_fact:
-        hpe_oobm_results: >
-          {% set node_results = hpe_oobm_results | default({}) if hpe_oobm_results is mapping else {} %}
-          {% set node = item | string %}
-          {% set current = node_results[node] | default({}) if node in node_results and node_results[node] is mapping else {} %}
-          {% if current.success | default(false) %}
-            {% set health_status = current.info.health_status | default({}) %}
-            {% set is_valid = health_status.system_health | default('Unknown') != 'Critical' %}
-            {% set updated = current | combine({
-                'health': {
-                  'valid': is_valid,
-                  'status': health_status
-                }
-              })
-            %}
-            {{ node_results | combine({node: updated}) }}
-          {% else %}
-            {{ node_results }}
-          {% endif %}
+        hpe_oobm_results: "{{ hpe_oobm_results | combine({
+            item: (hpe_oobm_results[item] | default({}) | combine({
+              'health_validation': {
+                'status': 'pass' if (hpe_oobm_results[item] | default({})).get('health_status', {}).get('system_health', 'Unknown') in ['OK', 'Good', 'Normal'] else ('fail' if (hpe_oobm_results[item] | default({})).get('health_status', {}).get('system_health', 'Unknown') in ['Critical', 'Failed', 'Error'] else 'warn'),
+                'system_health': (hpe_oobm_results[item] | default({})).get('health_status', {}).get('system_health', 'Unknown'),
+                'processor_health': (hpe_oobm_results[item] | default({})).get('health_status', {}).get('processor', 'Unknown'),
+                'memory_health': (hpe_oobm_results[item] | default({})).get('health_status', {}).get('memory', 'Unknown'),
+                'storage_health': (hpe_oobm_results[item] | default({})).get('health_status', {}).get('storage', 'Unknown'),
+                'message': 'System health is ' + ((hpe_oobm_results[item] | default({})).get('health_status', {}).get('system_health', 'Unknown')),
+                'validation_timestamp': ansible_date_time.iso8601
+              }
+            }))
+          }) }}"
       loop: "{{ hpe_hosts }}"
+      when: item in hpe_oobm_results
 
     # Validate boot settings
     - name: Validate boot settings
       ansible.builtin.set_fact:
-        hpe_oobm_results: >
-          {% set node_results = hpe_oobm_results | default({}) if hpe_oobm_results is mapping else {} %}
-          {% set node = item | string %}
-          {% set current = node_results[node] | default({}) if node in node_results and node_results[node] is mapping else {} %}
-          {% if current.success | default(false) %}
-            {% set boot_settings = current.info.boot_settings | default({}) %}
-            {% set updated = current | combine({
-                'boot': {
-                  'valid': true,
-                  'one_time_boot': boot_settings.one_time_boot | default('No Override'),
-                  'persistent_boot': boot_settings.persistent_boot | default('No Override')
-                }
-              })
-            %}
-            {{ node_results | combine({node: updated}) }}
-          {% else %}
-            {{ node_results }}
-          {% endif %}
+        hpe_oobm_results: "{{ hpe_oobm_results | combine({
+            item: (hpe_oobm_results[item] | default({}) | combine({
+              'boot_validation': {
+                'status': 'pass' if ((hpe_oobm_results[item] | default({})).get('boot_settings', {}).get('one_time_boot', 'Unknown') != 'Unknown' or (hpe_oobm_results[item] | default({})).get('boot_settings', {}).get('persistent_boot', 'Unknown') != 'Unknown') else 'warn',
+                'one_time_boot': (hpe_oobm_results[item] | default({})).get('boot_settings', {}).get('one_time_boot', 'Unknown'),
+                'persistent_boot': (hpe_oobm_results[item] | default({})).get('boot_settings', {}).get('persistent_boot', 'Unknown'),
+                'message': 'Boot settings available' if ((hpe_oobm_results[item] | default({})).get('boot_settings', {}).get('one_time_boot', 'Unknown') != 'Unknown' or (hpe_oobm_results[item] | default({})).get('boot_settings', {}).get('persistent_boot', 'Unknown') != 'Unknown') else 'Boot settings unavailable',
+                'validation_timestamp': ansible_date_time.iso8601
+              }
+            }))
+          }) }}"
       loop: "{{ hpe_hosts }}"
+      when: item in hpe_oobm_results
 
-    # Save validation results 
+    # Validate network adapters
+    - name: Validate network adapters
+      ansible.builtin.set_fact:
+        hpe_oobm_results: "{{ hpe_oobm_results | combine({
+            item: (hpe_oobm_results[item] | default({}) | combine({
+              'network_validation': {
+                'status': 'pass' if ((hpe_oobm_results[item] | default({})).get('network_adapters', []) | length > 0) else 'warn',
+                'adapter_count': (hpe_oobm_results[item] | default({})).get('network_adapters', []) | length,
+                'adapters': (hpe_oobm_results[item] | default({})).get('network_adapters', []),
+                'message': ((hpe_oobm_results[item] | default({})).get('network_adapters', []) | length | string) + ' network adapters found' if ((hpe_oobm_results[item] | default({})).get('network_adapters', []) | length > 0) else 'No network adapters detected',
+                'validation_timestamp': ansible_date_time.iso8601
+              }
+            }))
+          }) }}"
+      loop: "{{ hpe_hosts }}"
+      when: item in hpe_oobm_results
+
+    # Save validation results
     - name: Register validation end
       ansible.builtin.set_fact:
         hpe_oobm_validation_end: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
       run_once: true
 
-    - name: Store HPE iLO validation results
+    - name: Debug - Verify hpe_oobm_results before storage
+      ansible.builtin.debug:
+        msg:
+          - "hpe_oobm_results type: {{ hpe_oobm_results | type_debug }}"
+          - "hpe_oobm_results is mapping: {{ hpe_oobm_results is mapping }}"
+          - "hpe_oobm_results content: {{ hpe_oobm_results }}"
+      run_once: true
+
+
+
+    - name: Calculate summary statistics
       ansible.builtin.set_fact:
-        validation_results: "{{ (validation_results | default({}) if validation_results is mapping else {}) | combine({'hpe_oobm': {'start_time': hpe_oobm_validation_start,
-          'end_time': hpe_oobm_validation_end, 'results': hpe_oobm_results, 'summary': {'total': hpe_hosts | length, 'success': hpe_oobm_results | dict2items | selectattr('value.success',
-          'defined') | selectattr('value.success') | list | length, 'firmware_issues': hpe_oobm_results | dict2items | selectattr('value.firmware.valid', 'defined')
-          | rejectattr('value.firmware.valid') | list | length, 'health_issues': hpe_oobm_results | dict2items | selectattr('value.health.valid', 'defined') | rejectattr('value.health.valid')
-          | list | length}}}) }}"
+        hpe_success_count: >-
+          {{ (hpe_oobm_results | dict2items |
+            selectattr('value.connection_status', 'defined') |
+            selectattr('value.connection_status', 'equalto', 'success') | list | length)
+          if hpe_oobm_results is mapping else 0 }}
+        hpe_power_passed: >-
+          {{ (hpe_oobm_results | dict2items |
+              selectattr('value.power_validation.status', 'defined') |
+              selectattr('value.power_validation.status', 'equalto', 'pass') | list | length)
+             if hpe_oobm_results is mapping else 0 }}
+        hpe_firmware_passed: >-
+          {{ (hpe_oobm_results | dict2items |
+              selectattr('value.firmware_validation.status', 'defined') |
+              selectattr('value.firmware_validation.status', 'equalto', 'pass') | list | length)
+             if hpe_oobm_results is mapping else 0 }}
+        hpe_health_passed: >-
+          {{ (hpe_oobm_results | dict2items |
+              selectattr('value.health_validation.status', 'defined') |
+              selectattr('value.health_validation.status', 'equalto', 'pass') | list | length)
+             if hpe_oobm_results is mapping else 0 }}
+        hpe_boot_passed: >-
+          {{ (hpe_oobm_results | dict2items |
+              selectattr('value.boot_validation.status', 'defined') |
+              selectattr('value.boot_validation.status', 'equalto', 'pass') | list | length)
+             if hpe_oobm_results is mapping else 0 }}
+        hpe_network_passed: >-
+          {{ (hpe_oobm_results | dict2items |
+              selectattr('value.network_validation.status', 'defined') |
+              selectattr('value.network_validation.status', 'equalto', 'pass') | list | length)
+             if hpe_oobm_results is mapping else 0 }}
       delegate_to: localhost
       run_once: true
 
-    # Update check counters for final report
+    - name: Store HPE iLO validation results
+      ansible.builtin.set_fact:
+        validation_results: >-
+          {{ (validation_results | default({}) if validation_results is mapping else {}) | combine({
+            'hpe_oobm': {
+              'start_time': hpe_oobm_validation_start,
+              'end_time': hpe_oobm_validation_end,
+              'results': hpe_oobm_results,
+              'summary': {
+                'total': hpe_hosts | length,
+                'connection_success': hpe_success_count | int,
+                'power_passed': hpe_power_passed | int,
+                'firmware_passed': hpe_firmware_passed | int,
+                'health_passed': hpe_health_passed | int,
+                'boot_passed': hpe_boot_passed | int,
+                'network_passed': hpe_network_passed | int
+              }
+            }
+          }) }}
+      delegate_to: localhost
+      run_once: true
+
+    # Update check counters for final report  
     - name: Update check counters
       ansible.builtin.set_fact:
-        total_checks: "{{ total_checks | default(0) | int + (hpe_hosts | length * 4) }}" # power, firmware, health, boot
-        passed_checks: "{{ passed_checks | default(0) | int + (hpe_oobm_results | dict2items | selectattr('value.power_status.valid', 'defined') | selectattr('value.power_status.valid')
-          | list | length) + (hpe_oobm_results | dict2items | selectattr('value.firmware.valid', 'defined') | selectattr('value.firmware.valid') | list | length)
-          + (hpe_oobm_results | dict2items | selectattr('value.health.valid', 'defined') | selectattr('value.health.valid') | list | length) + (hpe_oobm_results |
-          dict2items | selectattr('value.boot.valid', 'defined') | selectattr('value.boot.valid') | list | length) }}"
-        failed_checks: "{{ failed_checks | default(0) | int + ((hpe_hosts | length * 4) - (hpe_oobm_results | dict2items | selectattr('value.power_status.valid',
-          'defined') | selectattr('value.power_status.valid') | list | length) - (hpe_oobm_results | dict2items | selectattr('value.firmware.valid', 'defined') |
-          selectattr('value.firmware.valid') | list | length) - (hpe_oobm_results | dict2items | selectattr('value.health.valid', 'defined') | selectattr('value.health.valid')
-          | list | length) - (hpe_oobm_results | dict2items | selectattr('value.boot.valid', 'defined') | selectattr('value.boot.valid') | list | length)) }}"
+        total_checks: "{{ total_checks | default(0) | int + (hpe_hosts | length * 5) }}"
+        passed_checks: >-
+          {{ passed_checks | default(0) | int +
+             hpe_power_passed | int +
+             hpe_firmware_passed | int +
+             hpe_health_passed | int +
+             hpe_boot_passed | int +
+             hpe_network_passed | int
+          }}
+        failed_checks: >-
+          {{ failed_checks | default(0) | int + ((hpe_hosts | length * 5) -
+             hpe_power_passed | int -
+             hpe_firmware_passed | int -
+             hpe_health_passed | int -
+             hpe_boot_passed | int -
+             hpe_network_passed | int)
+          }}
       delegate_to: localhost
       run_once: true

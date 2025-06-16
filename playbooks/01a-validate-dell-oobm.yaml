@@ -180,13 +180,22 @@
 
     - name: Store Dell iDRAC validation results
       ansible.builtin.set_fact:
-        validation_results: "{{ (validation_results | default({}) if validation_results is mapping else {}) | combine({'dell_oobm': {'start_time': dell_oobm_validation_start,
-          'end_time': dell_oobm_validation_end, 'results': dell_oobm_results, 'summary': {'total': dell_hosts | length, 'success': dell_oobm_results | dict2items
-          | selectattr('value.success', 'defined') | selectattr('value.success') | list | length, 'network_issues': dell_oobm_results | dict2items | selectattr('value.network_validation.valid',
-          'defined') | rejectattr('value.network_validation.valid') | list | length, 'ntp_issues': dell_oobm_results | dict2items | selectattr('value.ntp_validation.valid',
-          'defined') | rejectattr('value.ntp_validation.valid') | list | length, 'dns_issues': dell_oobm_results | dict2items | selectattr('value.dns_validation.valid',
-          'defined') | rejectattr('value.dns_validation.valid') | list | length, 'recent_reboots': dell_oobm_results | dict2items | selectattr('value.uptime_validation.valid',
-          'defined') | rejectattr('value.uptime_validation.valid') | list | length}}}) }}"
+        validation_results: >-
+          {{ (validation_results | default({}) if validation_results is mapping else {}) | combine({
+            'dell_oobm': {
+              'start_time': dell_oobm_validation_start,
+              'end_time': dell_oobm_validation_end,
+              'results': dell_oobm_results,
+              'summary': {
+                'total': dell_hosts | length,
+                'success': (dell_oobm_results | dict2items | selectattr('value.success', 'defined') | selectattr('value.success') | list | length) if dell_oobm_results is mapping else 0,
+                'network_issues': (dell_oobm_results | dict2items | selectattr('value.network_validation.valid', 'defined') | rejectattr('value.network_validation.valid') | list | length) if dell_oobm_results is mapping else 0,
+                'ntp_issues': (dell_oobm_results | dict2items | selectattr('value.ntp_validation.valid', 'defined') | rejectattr('value.ntp_validation.valid') | list | length) if dell_oobm_results is mapping else 0,
+                'dns_issues': (dell_oobm_results | dict2items | selectattr('value.dns_validation.valid', 'defined') | rejectattr('value.dns_validation.valid') | list | length) if dell_oobm_results is mapping else 0,
+                'recent_reboots': (dell_oobm_results | dict2items | selectattr('value.uptime_validation.valid', 'defined') | rejectattr('value.uptime_validation.valid') | list | length) if dell_oobm_results is mapping else 0
+              }
+            }
+          }) }}
       delegate_to: localhost
       run_once: true
 
@@ -194,15 +203,19 @@
     - name: Update check counters
       ansible.builtin.set_fact:
         total_checks: "{{ total_checks | default(0) | int + (dell_hosts | length * 4) }}" # network, ntp, dns, uptime
-        passed_checks: "{{ passed_checks | default(0) | int + (dell_oobm_results | dict2items | selectattr('value.network_validation.valid', 'defined') | selectattr('value.network_validation.valid')
-          | list | length) + (dell_oobm_results | dict2items | selectattr('value.ntp_validation.valid', 'defined') | selectattr('value.ntp_validation.valid') | list
-          | length) + (dell_oobm_results | dict2items | selectattr('value.dns_validation.valid', 'defined') | selectattr('value.dns_validation.valid') | list | length)
-          + (dell_oobm_results | dict2items | selectattr('value.uptime_validation.valid', 'defined') | selectattr('value.uptime_validation.valid') | list | length)
-          }}"
-        failed_checks: "{{ failed_checks | default(0) | int + ((dell_hosts | length * 4) - (dell_oobm_results | dict2items | selectattr('value.network_validation.valid',
-          'defined') | selectattr('value.network_validation.valid') | list | length) - (dell_oobm_results | dict2items | selectattr('value.ntp_validation.valid',
-          'defined') | selectattr('value.ntp_validation.valid') | list | length) - (dell_oobm_results | dict2items | selectattr('value.dns_validation.valid', 'defined')
-          | selectattr('value.dns_validation.valid') | list | length) - (dell_oobm_results | dict2items | selectattr('value.uptime_validation.valid', 'defined') |
-          selectattr('value.uptime_validation.valid') | list | length)) }}"
+        passed_checks: >-
+          {{ passed_checks | default(0) | int +
+             ((dell_oobm_results | dict2items | selectattr('value.network_validation.valid', 'defined') | selectattr('value.network_validation.valid') | list | length) if dell_oobm_results is mapping else 0) +
+             ((dell_oobm_results | dict2items | selectattr('value.ntp_validation.valid', 'defined') | selectattr('value.ntp_validation.valid') | list | length) if dell_oobm_results is mapping else 0) +
+             ((dell_oobm_results | dict2items | selectattr('value.dns_validation.valid', 'defined') | selectattr('value.dns_validation.valid') | list | length) if dell_oobm_results is mapping else 0) +
+             ((dell_oobm_results | dict2items | selectattr('value.uptime_validation.valid', 'defined') | selectattr('value.uptime_validation.valid') | list | length) if dell_oobm_results is mapping else 0)
+          }}
+        failed_checks: >-
+          {{ failed_checks | default(0) | int + ((dell_hosts | length * 4) -
+             ((dell_oobm_results | dict2items | selectattr('value.network_validation.valid', 'defined') | selectattr('value.network_validation.valid') | list | length) if dell_oobm_results is mapping else 0) -
+             ((dell_oobm_results | dict2items | selectattr('value.ntp_validation.valid', 'defined') | selectattr('value.ntp_validation.valid') | list | length) if dell_oobm_results is mapping else 0) -
+             ((dell_oobm_results | dict2items | selectattr('value.dns_validation.valid', 'defined') | selectattr('value.dns_validation.valid') | list | length) if dell_oobm_results is mapping else 0) -
+             ((dell_oobm_results | dict2items | selectattr('value.uptime_validation.valid', 'defined') | selectattr('value.uptime_validation.valid') | list | length) if dell_oobm_results is mapping else 0))
+          }}
       delegate_to: localhost
       run_once: true
