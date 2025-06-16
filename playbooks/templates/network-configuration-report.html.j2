@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Garden-Tiller Network Configuration Report</title>
+    <style>
+        :root {
+            --success-color: #28a745;
+            --warning-color: #ffc107;
+            --error-color: #dc3545;
+            --info-color: #17a2b8;
+            --primary-color: #2c3e50;
+            --secondary-color: #34495e;
+            --light-bg: #f8f9fa;
+            --border-color: #dee2e6;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: var(--secondary-color);
+            background-color: var(--light-bg);
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #2980b9, #3498db);
+            color: white;
+            padding: 40px;
+            border-radius: 12px;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+
+        .section {
+            background: white;
+            margin: 30px 0;
+            border-radius: 12px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+
+        .section-header {
+            background: var(--primary-color);
+            color: white;
+            padding: 20px 30px;
+            font-size: 1.3rem;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .section-content {
+            padding: 30px;
+        }
+
+        .network-topology {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
+
+        .network-node {
+            border: 2px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+            background: white;
+            position: relative;
+        }
+
+        .network-node.switch {
+            background: linear-gradient(45deg, #e3f2fd, #bbdefb);
+            border-color: var(--info-color);
+        }
+
+        .network-node.server {
+            background: linear-gradient(45deg, #f3e5f5, #e1bee7);
+            border-color: var(--primary-color);
+        }
+
+        .node-header {
+            font-size: 1.2rem;
+            font-weight: bold;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .interface-list {
+            margin: 15px 0;
+        }
+
+        .interface-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 12px;
+            margin: 5px 0;
+            background: rgba(255, 255, 255, 0.7);
+            border-radius: 6px;
+            border-left: 4px solid var(--info-color);
+        }
+
+        .interface-item.bonded {
+            border-left-color: var(--success-color);
+        }
+
+        .interface-item.error {
+            border-left-color: var(--error-color);
+        }
+
+        .interface-name {
+            font-weight: 500;
+        }
+
+        .interface-status {
+            font-size: 0.9rem;
+            display: flex;
+            gap: 10px;
+        }
+
+        .status-indicator {
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            font-weight: bold;
+        }
+
+        .status-up {
+            background: var(--success-color);
+            color: white;
+        }
+
+        .status-down {
+            background: var(--error-color);
+            color: white;
+        }
+
+        .status-warning {
+            background: var(--warning-color);
+            color: white;
+        }
+
+        .vlan-tags {
+            display: flex;
+            gap: 5px;
+            flex-wrap: wrap;
+        }
+
+        .vlan-tag {
+            background: var(--info-color);
+            color: white;
+            padding: 2px 6px;
+            border-radius: 10px;
+            font-size: 0.7rem;
+        }
+
+        .lacp-group {
+            background: rgba(40, 167, 69, 0.1);
+            border: 1px dashed var(--success-color);
+            border-radius: 8px;
+            padding: 15px;
+            margin: 10px 0;
+        }
+
+        .lacp-header {
+            font-weight: bold;
+            color: var(--success-color);
+            margin-bottom: 10px;
+        }
+
+        .connection-line {
+            position: absolute;
+            height: 2px;
+            background: var(--info-color);
+            top: 50%;
+            transform: translateY(-50%);
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            border-left: 4px solid var(--info-color);
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: bold;
+            color: var(--info-color);
+        }
+
+        .stat-label {
+            font-size: 0.9rem;
+            opacity: 0.8;
+        }
+
+        .config-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+
+        .config-table th,
+        .config-table td {
+            border: 1px solid var(--border-color);
+            padding: 12px;
+            text-align: left;
+        }
+
+        .config-table th {
+            background: var(--light-bg);
+            font-weight: 600;
+        }
+
+        .config-table tbody tr:nth-child(even) {
+            background: #fafafa;
+        }
+
+        .collapsible {
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            margin: 10px 0;
+        }
+
+        .collapsible-header {
+            padding: 15px 20px;
+            background: var(--light-bg);
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .collapsible-content {
+            padding: 20px;
+            display: none;
+        }
+
+        .collapsible.active .collapsible-content {
+            display: block;
+        }
+
+        .performance-meter {
+            background: #e9ecef;
+            border-radius: 10px;
+            height: 20px;
+            margin: 10px 0;
+            overflow: hidden;
+        }
+
+        .performance-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--success-color), #20c997);
+            transition: width 0.3s ease;
+        }
+    </style>
+    <script>
+        function toggleCollapsible(element) {
+            element.classList.toggle('active');
+        }
+        
+        document.addEventListener('DOMContentLoaded', function() {
+            document.querySelectorAll('.collapsible-header').forEach(header => {
+                header.addEventListener('click', () => {
+                    toggleCollapsible(header.parentNode);
+                });
+            });
+        });
+    </script>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🌐 Network Configuration Report</h1>
+            <div>{{ lab_environment | default('Garden-Tiller Lab') }}</div>
+            <div>Generated on {{ generation_timestamp | default(ansible_date_time.iso8601) }}</div>
+        </div>
+
+        <!-- Network Statistics -->
+        <div class="section">
+            <div class="section-header">
+                📊 Network Overview
+            </div>
+            <div class="section-content">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value">{{ groups['baremetal'] | length }}</div>
+                        <div class="stat-label">Total Hosts</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">
+                            {% set basic_passed = 0 %}
+                            {% for key, data in validation_results.network.results.items() if key.endswith('_basic') %}
+                                {% if data.routing.internet_reachable and data.routing.dns_resolution %}
+                                    {% set basic_passed = basic_passed + 1 %}
+                                {% endif %}
+                            {% endfor %}
+                            {{ basic_passed }}
+                        </div>
+                        <div class="stat-label">Network Tests Passed</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">{{ validation_results.network.summary.lacp_tests_successful | default(0) }}</div>
+                        <div class="stat-label">LACP Tests Passed</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">
+                            {% set bond_count = 0 %}
+                            {% for key, data in validation_results.network.results.items() if key.endswith('_basic') %}
+                                {% if data.bond.status %}
+                                    {% set bond_count = bond_count + 1 %}
+                                {% endif %}
+                            {% endfor %}
+                            {{ bond_count }}
+                        </div>
+                        <div class="stat-label">Active Bonds</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Network Topology -->
+        <div class="section">
+            <div class="section-header">
+                🗺️ Network Topology
+            </div>
+            <div class="section-content">
+                <div class="network-topology">
+                    {% for host in groups['baremetal'] %}
+                    {% set host_data = validation_results.network.results.get(host + '_basic', {}) %}
+                    <div class="network-node server">
+                        <div class="node-header">
+                            🖥️ {{ host }}
+                            {% if host_data.routing.internet_reachable and host_data.routing.dns_resolution %}
+                                <span class="status-indicator status-up">ONLINE</span>
+                            {% else %}
+                                <span class="status-indicator status-down">ISSUES</span>
+                            {% endif %}
+                        </div>
+
+                        <!-- Bonding Information -->
+                        {% if host_data.bond.status %}
+                        <div class="lacp-group">
+                            <div class="lacp-header">🔗 Bond Interface ({{ host_data.bond.mode }})</div>
+                            <div class="interface-item bonded">
+                                <span class="interface-name">bond0</span>
+                                <span class="interface-status">
+                                    <span class="status-indicator status-up">ACTIVE</span>
+                                </span>
+                            </div>
+                        </div>
+                        {% endif %}
+
+                        <!-- Network Interfaces -->
+                        <div class="interface-list">
+                            {% set interface_count = ansible_interfaces | default([]) | length %}
+                            {% if interface_count > 0 %}
+                                {% for interface in ansible_interfaces[:5] %}
+                                <div class="interface-item">
+                                    <span class="interface-name">{{ interface }}</span>
+                                    <span class="interface-status">
+                                        <span class="status-indicator status-up">UP</span>
+                                        {% if host_data.vlan.status %}
+                                            <div class="vlan-tags">
+                                                <span class="vlan-tag">VLAN</span>
+                                            </div>
+                                        {% endif %}
+                                    </span>
+                                </div>
+                                {% endfor %}
+                                {% if interface_count > 5 %}
+                                <div style="text-align: center; font-style: italic; margin-top: 10px;">
+                                    ... and {{ interface_count - 5 }} more interfaces
+                                </div>
+                                {% endif %}
+                            {% else %}
+                                <div class="interface-item">
+                                    <span class="interface-name">No interface data available</span>
+                                </div>
+                            {% endif %}
+                        </div>
+
+                        <!-- Connection Status -->
+                        <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #ddd;">
+                            <div style="display: flex; justify-content: space-between; margin: 5px 0;">
+                                <span>Gateway:</span>
+                                <span>{{ '✅' if host_data.routing.gateway_reachable else '❌' }}</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; margin: 5px 0;">
+                                <span>Internet:</span>
+                                <span>{{ '✅' if host_data.routing.internet_reachable else '❌' }}</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; margin: 5px 0;">
+                                <span>DNS:</span>
+                                <span>{{ '✅' if host_data.routing.dns_resolution else '❌' }}</span>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+
+        <!-- Detailed Network Configuration -->
+        <div class="section">
+            <div class="section-header">
+                ⚙️ Detailed Network Configuration
+            </div>
+            <div class="section-content">
+                {% for host in groups['baremetal'] %}
+                {% set host_data = validation_results.network.results.get(host + '_basic', {}) %}
+                <div class="collapsible">
+                    <div class="collapsible-header">
+                        <span>🖥️ {{ host }} Configuration Details</span>
+                        <span>▶</span>
+                    </div>
+                    <div class="collapsible-content">
+                        <table class="config-table">
+                            <thead>
+                                <tr>
+                                    <th>Component</th>
+                                    <th>Status</th>
+                                    <th>Details</th>
+                                    <th>Notes</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td><strong>Bonding/LACP</strong></td>
+                                    <td>
+                                        {% if host_data.bond.status %}
+                                            <span class="status-indicator status-up">ACTIVE</span>
+                                        {% else %}
+                                            <span class="status-indicator status-down">NONE</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>{{ host_data.bond.mode | default('N/A') }}</td>
+                                    <td>{{ 'Passed validation' if host_data.bond.passed else 'Configuration issues detected' }}</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>VLAN Configuration</strong></td>
+                                    <td>
+                                        {% if host_data.vlan.status %}
+                                            <span class="status-indicator status-up">CONFIGURED</span>
+                                        {% else %}
+                                            <span class="status-indicator status-warning">NONE</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>{{ host_data.vlan.details | length | default(0) }} VLAN(s)</td>
+                                    <td>
+                                        {% if host_data.vlan.details %}
+                                            {{ host_data.vlan.details[:3] | join(', ') }}
+                                            {% if host_data.vlan.details | length > 3 %}...{% endif %}
+                                        {% else %}
+                                            No VLANs configured
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td><strong>MTU Settings</strong></td>
+                                    <td>
+                                        {% if host_data.mtu.passed %}
+                                            <span class="status-indicator status-up">CORRECT</span>
+                                        {% else %}
+                                            <span class="status-indicator status-warning">MIXED</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>Expected: {{ host_data.mtu.expected | default(1500) }}</td>
+                                    <td>
+                                        {% if host_data.mtu.results %}
+                                            {% set correct_mtu = host_data.mtu.results.values() | select('equalto', true) | list | length %}
+                                            {{ correct_mtu }}/{{ host_data.mtu.results | length }} interfaces correct
+                                        {% else %}
+                                            No MTU data available
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Interface Errors</strong></td>
+                                    <td>
+                                        {% if host_data.errors.passed %}
+                                            <span class="status-indicator status-up">CLEAN</span>
+                                        {% else %}
+                                            <span class="status-indicator status-down">ERRORS</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>{{ host_data.errors.interfaces_with_errors | length | default(0) }} interface(s)</td>
+                                    <td>
+                                        {% if host_data.errors.interfaces_with_errors %}
+                                            {{ host_data.errors.interfaces_with_errors | join(', ') }}
+                                        {% else %}
+                                            No errors detected
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Routing</strong></td>
+                                    <td>
+                                        {% if host_data.routing.has_default_route %}
+                                            <span class="status-indicator status-up">CONFIGURED</span>
+                                        {% else %}
+                                            <span class="status-indicator status-down">MISSING</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>Default route configured</td>
+                                    <td>{{ 'Gateway reachable' if host_data.routing.gateway_reachable else 'Gateway unreachable' }}</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Internet Connectivity</strong></td>
+                                    <td>
+                                        {% if host_data.routing.internet_reachable %}
+                                            <span class="status-indicator status-up">WORKING</span>
+                                        {% else %}
+                                            <span class="status-indicator status-down">FAILED</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>Ping to 8.8.8.8</td>
+                                    <td>External connectivity test</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>DNS Resolution</strong></td>
+                                    <td>
+                                        {% if host_data.routing.dns_resolution %}
+                                            <span class="status-indicator status-up">WORKING</span>
+                                        {% else %}
+                                            <span class="status-indicator status-down">FAILED</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>Resolve www.redhat.com</td>
+                                    <td>DNS functionality test</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- LACP Test Results -->
+        {% if validation_results.network.summary.lacp_tests_run > 0 %}
+        <div class="section">
+            <div class="section-header">
+                🔗 Advanced LACP Test Results
+            </div>
+            <div class="section-content">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value">{{ validation_results.network.summary.lacp_tests_run }}</div>
+                        <div class="stat-label">Total LACP Tests</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">{{ validation_results.network.summary.lacp_tests_successful }}</div>
+                        <div class="stat-label">Successful Tests</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">
+                            {{ ((validation_results.network.summary.lacp_tests_successful / validation_results.network.summary.lacp_tests_run) * 100) | round(1) }}%
+                        </div>
+                        <div class="stat-label">Success Rate</div>
+                    </div>
+                </div>
+
+                <table class="config-table">
+                    <thead>
+                        <tr>
+                            <th>Host</th>
+                            <th>Test Status</th>
+                            <th>Test Time</th>
+                            <th>Details</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for key, data in validation_results.network.results.items() if data.lacp_test_success is defined %}
+                        <tr>
+                            <td><strong>{{ key }}</strong></td>
+                            <td>
+                                {% if data.lacp_test_success %}
+                                    <span class="status-indicator status-up">PASSED</span>
+                                {% else %}
+                                    <span class="status-indicator status-down">FAILED</span>
+                                {% endif %}
+                            </td>
+                            <td>{{ data.test_timestamp | default('Unknown') }}</td>
+                            <td>
+                                {% if data.lacp_test_success %}
+                                    LACP configuration validated successfully
+                                {% else %}
+                                    {{ data.lacp_test_error[:100] | default('Test failed') }}...
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Network Discovery Information -->
+        {% if validation_results.network.results.validation_metadata is defined %}
+        <div class="section">
+            <div class="section-header">
+                🔍 Network Discovery
+            </div>
+            <div class="section-content">
+                <div class="collapsible">
+                    <div class="collapsible-header">
+                        <span>Discovered Network Interfaces</span>
+                        <span>▶</span>
+                    </div>
+                    <div class="collapsible-content">
+                        <pre style="background: #f8f9fa; padding: 15px; border-radius: 8px; overflow-x: auto;">{{ validation_results.network.results.validation_metadata.discovered_interfaces | default('No interface discovery data available') }}</pre>
+                    </div>
+                </div>
+
+                <div class="collapsible">
+                    <div class="collapsible-header">
+                        <span>MTU Settings</span>
+                        <span>▶</span>
+                    </div>
+                    <div class="collapsible-content">
+                        <pre style="background: #f8f9fa; padding: 15px; border-radius: 8px; overflow-x: auto;">{{ validation_results.network.results.validation_metadata.mtu_settings | default('No MTU data available') }}</pre>
+                    </div>
+                </div>
+
+                <div class="collapsible">
+                    <div class="collapsible-header">
+                        <span>Network Kernel Modules</span>
+                        <span>▶</span>
+                    </div>
+                    <div class="collapsible-content">
+                        <pre style="background: #f8f9fa; padding: 15px; border-radius: 8px; overflow-x: auto;">{{ validation_results.network.results.validation_metadata.kernel_modules | default('No kernel module data available') }}</pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Footer -->
+        <div style="text-align: center; padding: 30px; margin-top: 40px; color: #666;">
+            <p>Generated by Garden-Tiller Network Validation System</p>
+            <p>Report created on {{ generation_timestamp | default(ansible_date_time.iso8601) }}</p>
+        </div>
+    </div>
+</body>
+</html>

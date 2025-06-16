@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Garden-Tiller Firmware Validation Report</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .header { background: #2c3e50; color: white; padding: 20px; border-radius: 5px; }
+        .summary { background: #f8f9fa; padding: 20px; margin: 20px 0; border-radius: 5px; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0; }
+        .stat-card { background: white; padding: 15px; border-radius: 5px; border-left: 4px solid #007bff; }
+        .stat-value { font-size: 2em; font-weight: bold; color: #007bff; }
+        .success { border-left-color: #28a745; }
+        .success .stat-value { color: #28a745; }
+        .warning { border-left-color: #ffc107; }
+        .warning .stat-value { color: #ffc107; }
+        .error { border-left-color: #dc3545; }
+        .error .stat-value { color: #dc3545; }
+        .host-table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        .host-table th, .host-table td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+        .host-table th { background-color: #f2f2f2; font-weight: bold; }
+        .status-compliant { color: #28a745; font-weight: bold; }
+        .status-non-compliant { color: #dc3545; font-weight: bold; }
+        .status-skipped { color: #6c757d; font-style: italic; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🔧 Garden-Tiller Firmware Validation Report</h1>
+        <p>Generated: {{ report_timestamp | default('Unknown') }}</p>
+        <p>Validation Period: {{ start_time | default('Unknown') }} to {{ end_time | default('Unknown') }}</p>
+    </div>
+
+    <div class="summary">
+        <h2>📊 Firmware Compliance Summary</h2>
+        <div class="stats">
+            <div class="stat-card {{ 'success' if (firmware_summary.compliant_hosts | int) == (firmware_summary.analyzed_hosts | int) else 'warning' }}">
+                <h3>✅ Compliant Hosts</h3>
+                <div class="stat-value">{{ firmware_summary.compliant_hosts | default(0) }}</div>
+                <p>out of {{ firmware_summary.analyzed_hosts | default(0) }} analyzed</p>
+            </div>
+            <div class="stat-card {{ 'error' if (firmware_summary.non_compliant_hosts | default(0) | int) > 0 else 'success' }}">
+                <h3>❌ Non-Compliant Hosts</h3>
+                <div class="stat-value">{{ firmware_summary.non_compliant_hosts | default(0) }}</div>
+                <p>requiring updates</p>
+            </div>
+            <div class="stat-card">
+                <h3>📈 Compliance Rate</h3>
+                <div class="stat-value">{{ firmware_summary.compliance_rate | default(0) }}%</div>
+                <p>overall compliance</p>
+            </div>
+            <div class="stat-card {{ 'error' if (firmware_summary.total_critical_updates | default(0) | int) > 0 else 'success' }}">
+                <h3>🚨 Critical Updates</h3>
+                <div class="stat-value">{{ firmware_summary.total_critical_updates | default(0) }}</div>
+                <p>requiring immediate attention</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="summary">
+        <h2>🔍 Component Analysis</h2>
+        <div class="stats">
+            <div class="stat-card">
+                <h3>📦 Total Components</h3>
+                <div class="stat-value">{{ firmware_summary.total_components | default(0) }}</div>
+                <p>analyzed across all hosts</p>
+            </div>
+            <div class="stat-card warning">
+                <h3>📥 Updates Available</h3>
+                <div class="stat-value">{{ firmware_summary.total_updates_required | default(0) }}</div>
+                <p>firmware updates needed</p>
+            </div>
+            <div class="stat-card">
+                <h3>🏭 Total Hosts</h3>
+                <div class="stat-value">{{ firmware_summary.total_hosts | default(0) }}</div>
+                <p>in infrastructure</p>
+            </div>
+            <div class="stat-card">
+                <h3>✅ Analyzed Hosts</h3>
+                <div class="stat-value">{{ firmware_summary.analyzed_hosts | default(0) }}</div>
+                <p>successfully processed</p>
+            </div>
+        </div>
+    </div>
+
+    {% if all_firmware_results is defined and all_firmware_results | length > 0 %}
+    <div class="summary">
+        <h2>📋 Host-by-Host Firmware Status</h2>
+        <table class="host-table">
+            <thead>
+                <tr>
+                    <th>Hostname</th>
+                    <th>Compliance Status</th>
+                    <th>Total Components</th>
+                    <th>Updates Required</th>
+                    <th>Critical Updates</th>
+                    <th>Analysis Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for host in groups['baremetal'] %}
+                {% set host_result = hostvars[host].firmware_compliance | default({}) %}
+                <tr>
+                    <td><strong>{{ host }}</strong></td>
+                    <td class="status-{{ host_result.compliance_status | default('unknown') | lower | replace('_', '-') }}">
+                        {{ host_result.compliance_status | default('UNKNOWN') }}
+                    </td>
+                    <td>{{ host_result.total_components | default(0) }}</td>
+                    <td>{{ host_result.updates_required | default(0) }}</td>
+                    <td>{{ host_result.critical_updates | default(0) }}</td>
+                    <td class="status-{{ host_result.analysis_status | default('unknown') | lower }}">
+                        {{ host_result.analysis_status | default('unknown') | title }}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    <div class="summary">
+        <h2>🎯 Recommendations</h2>
+        {% if (firmware_summary.total_critical_updates | default(0) | int) > 0 %}
+        <div style="background: #f8d7da; color: #721c24; padding: 15px; border-radius: 5px; margin: 10px 0;">
+            <h3>🚨 Critical Action Required</h3>
+            <p><strong>{{ firmware_summary.total_critical_updates }} critical firmware updates</strong> require immediate attention. These may include BMC or BIOS updates that address security vulnerabilities or stability issues.</p>
+        </div>
+        {% endif %}
+        
+        <ul>
+            {% if (firmware_summary.non_compliant_hosts | default(0) | int) > 0 %}
+            <li><strong>Priority:</strong> Update firmware on {{ firmware_summary.non_compliant_hosts }} non-compliant hosts</li>
+            {% endif %}
+            {% if (firmware_summary.total_updates_required | default(0) | int) > 0 %}
+            <li><strong>Schedule:</strong> Plan maintenance window for {{ firmware_summary.total_updates_required }} firmware updates</li>
+            {% endif %}
+            <li><strong>Verify:</strong> Test all firmware updates in development environment first</li>
+            <li><strong>Backup:</strong> Ensure configuration backups before applying updates</li>
+            <li><strong>Monitor:</strong> Verify system stability after firmware updates</li>
+            {% if (firmware_summary.compliance_rate | default(0) | int) == 100 %}
+            <li><strong>Maintenance:</strong> All systems compliant - continue regular firmware monitoring</li>
+            {% endif %}
+        </ul>
+    </div>
+
+    <footer style="margin-top: 40px; text-align: center; color: #666;">
+        <p>Generated by Garden-Tiller Firmware Validation Suite</p>
+        <p>Report Timestamp: {{ report_timestamp | default('Unknown') }}</p>
+        <p>For technical support, consult the Garden-Tiller documentation</p>
+    </footer>
+</body>
+</html>
