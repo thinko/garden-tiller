@@ -9,9 +9,11 @@
   tags: [report, all]
   vars:
     structlog_level: info
+    firmware_output_dir: "{{ playbook_dir }}/../reports/firmware" # From 03-firmware-update.yaml
     report_dir: "{{ playbook_dir }}/../reports"
+    timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
     today_date: "{{ lookup('pipe', 'date +%Y%m%d') }}"
-    report_file: "{{ report_dir }}/lab-report-{{ today_date }}.html"
+    report_file: "{{ report_dir }}/lab-report-{{ timestamp }}.html"
   tasks:
     - name: Register report start time
       ansible.builtin.set_fact:
@@ -23,52 +25,209 @@
         msg: "Configuring Structlog logger for report generation at level: {{ structlog_level }}"
       run_once: true
 
+    - name: Robustly initialize validation results with comprehensive data merging
+      ansible.builtin.set_fact:
+        validation_results: "{{ validation_results | default({}) }}"
+        total_checks: "{{ total_checks | default(0) }}"
+        passed_checks: "{{ passed_checks | default(0) }}"
+        failed_checks: "{{ failed_checks | default(0) }}"
+        warning_checks: "{{ warning_checks | default(0) }}"
+        lab_environment: "{{ lab_environment | default('Garden-Tiller Lab') }}"
+      run_once: true
+
+    - name: Debug validation_results structure
+      ansible.builtin.debug:
+        msg:
+          - "validation_results type: {{ validation_results | type_debug }}"
+          - "validation_results keys: {{ validation_results.keys() | list if validation_results is mapping else 'Not a mapping' }}"
+          - "total_checks: {{ total_checks }}"
+          - "passed_checks: {{ passed_checks }}"
+          - "failed_checks: {{ failed_checks }}"
+      run_once: true
+
+    - name: Load detailed firmware analysis files for each host
+      block:
+        - name: Find all firmware analysis JSON files
+          ansible.builtin.find:
+            paths: "{{ firmware_output_dir }}"
+            patterns: "*_firmware_analysis.json"
+            recurse: no
+          register: firmware_analysis_files
+          delegate_to: localhost
+          run_once: true
+
+        - name: Create a dictionary for detailed firmware results by host
+          ansible.builtin.set_fact:
+            detailed_firmware_results_by_host: {}
+          run_once: true
+
+        - name: Load and process each firmware analysis file
+          ansible.builtin.set_fact:
+            detailed_firmware_results_by_host: >-
+              {{ detailed_firmware_results_by_host | combine({
+                   (item.path | basename | regex_replace('_firmware_analysis.json$', '')): (lookup('file', item.path) | from_json).host_results[(item.path | basename | regex_replace('_firmware_analysis.json$', ''))]
+                 })
+              }}
+          loop: "{{ firmware_analysis_files.files }}"
+          run_once: true
+          delegate_to: localhost
+          when: firmware_analysis_files.files is defined and firmware_analysis_files.files | length > 0
+
+        - name: Merge detailed firmware results into main validation_results
+          ansible.builtin.set_fact:
+            validation_results: >-
+              {{ validation_results | combine({'firmware': (validation_results.firmware | default({})) | combine({'details_by_host': detailed_firmware_results_by_host | default({})}) }, recursive=True) }}
+          run_once: true
+          when: detailed_firmware_results_by_host is defined
+
+      rescue:
+        - name: Log firmware file loading errors
+          ansible.builtin.debug:
+            msg: "Some firmware analysis files could not be loaded or parsed - continuing with available data. Error: {{ ansible_failed_result }}"
+      run_once: true
+    # Note: The global total_checks, passed_checks, failed_checks, warning_checks
+    # are already accumulated by individual playbooks. No need to recalculate here
+    # unless the logic in those playbooks is insufficient.
+
+    - name: Debug validation results structure
+      ansible.builtin.debug:
+        msg:
+          - "Validation results type: {{ validation_results | type_debug }}"
+          - "Validation results is mapping: {{ validation_results is mapping }}"
+          - "Validation results content (sample): {{ validation_results | to_nice_json | truncate(1000, True) }}"
+          - "Total Checks (Global): {{ total_checks }}"
+          - "Passed Checks (Global): {{ passed_checks }}"
+          - "Failed Checks (Global): {{ failed_checks }}"
+          - "Warning Checks (Global): {{ warning_checks }}"
+          - "Firmware details loaded for hosts: {{ validation_results.firmware.details_by_host.keys() if validation_results.firmware.details_by_host is defined else 'None' }}"
+      delegate_to: localhost
+
     - name: Ensure report directory exists
       ansible.builtin.file:
         path: "{{ report_dir }}"
         state: directory
         mode: "0755"
 
-    - name: Generate HTML report
-      ansible.builtin.copy:
-        content: |
-          <!DOCTYPE html>
-          <html>
-          <head>
-            <title>Garden-Tiller Validation Report</title>
-            <style>
-              body { font-family: Arial, sans-serif; margin: 20px; }
-              h1 { color: #2c3e50; }
-              .section { margin-bottom: 20px; }
-              .success { color: green; }
-              .warning { color: orange; }
-              .error { color: red; }
-            </style>
-          </head>
-          <body>
-            <h1>Garden-Tiller Validation Report</h1>
-            <p>Report generated on: {{ report_start }}</p>
+    - name: Consolidate server data from all validation results
+      ansible.builtin.set_fact:
+        validation_results: >-
+          {% set all_servers = {} %}
+          {% set current_results = validation_results | default({}) %}
+          
+          <!-- Process HPE iLO results -->
+          {% if current_results.hpe_oobm is defined and current_results.hpe_oobm.results is defined %}
+            {% for hostname, host_data in current_results.hpe_oobm.results.items() %}
+              {% set server_entry = {
+                'connection_status': host_data.connection_status | default('unknown'),
+                'server_details': host_data.server_details | default({}),
+                'health_status': host_data.health_status | default({}),
+                'boot_settings': host_data.boot_settings | default({}),
+                'network_adapters': host_data.network_adapters | default([]),
+                'bmc_address': host_data.bmc_address | default('Unknown'),
+                'bmc_type': host_data.bmc_type | default('ilo'),
+                'collection_timestamp': host_data.collection_timestamp | default('Unknown'),
+                'power_validation': host_data.power_validation | default({}),
+                'firmware_validation': host_data.firmware_validation | default({}),
+                'health_validation': host_data.health_validation | default({}),
+                'boot_validation': host_data.boot_validation | default({}),
+                'network_validation': host_data.network_validation | default({}),
+                'raw_data': host_data.raw_data | default({}),
+                'error_details': host_data.error_details | default({}) if host_data.connection_status == 'failed' else {}
+              } %}
+              {% set all_servers = all_servers | combine({hostname: server_entry}) %}
+            {% endfor %}
+          {% endif %}
+          
+          <!-- Process Dell iDRAC results -->
+          {% if current_results.dell_oobm is defined and current_results.dell_oobm.results is defined %}
+            {% for hostname, host_data in current_results.dell_oobm.results.items() %}
+              {% set existing_server = all_servers.get(hostname, {}) %}
+              {% set server_entry = existing_server | combine({
+                'connection_status': host_data.connection_status | default(existing_server.connection_status | default('unknown')),
+                'server_details': existing_server.server_details | default({}) | combine(host_data.server_details | default({})),
+                'bmc_address': host_data.bmc_address | default(existing_server.bmc_address | default('Unknown')),
+                'bmc_type': host_data.bmc_type | default('idrac'),
+                'collection_timestamp': host_data.collection_timestamp | default(existing_server.collection_timestamp | default('Unknown')),
+                'dell_data': host_data,
+                'raw_data': existing_server.raw_data | default({}) | combine(host_data.raw_data | default({})),
+                'error_details': host_data.error_details | default({}) if host_data.connection_status == 'failed' else existing_server.error_details | default({})
+              }) %}
+              {% set all_servers = all_servers | combine({hostname: server_entry}) %}
+            {% endfor %}
+          {% endif %}
+          
+          <!-- Process MAC address validation results -->
+          {% if current_results.mac_validation is defined and current_results.mac_validation.results is defined %}
+            {% for hostname, mac_data in current_results.mac_validation.results.items() %}
+              {% set existing_server = all_servers.get(hostname, {}) %}
+              {% set server_entry = existing_server | combine({
+                'network_interfaces': mac_data.interfaces | default({}),
+                'interface_count': mac_data.interface_count | default(0),
+                'valid_mac_count': mac_data.valid_mac_count | default(0),
+                'invalid_mac_count': mac_data.invalid_mac_count | default(0),
+                'mac_validation_status': mac_data.validation_status | default('unknown'),
+                'mac_data_source': mac_data.data_source | default('unknown')
+              }) %}
+              {% set all_servers = all_servers | combine({hostname: server_entry}) %}
+            {% endfor %}
+          {% endif %}
+          
+          <!-- Process IPMI results -->
+          {% if current_results.ipmi is defined and current_results.ipmi.results is defined %}
+            {% for hostname, ipmi_data in current_results.ipmi.results.items() %}
+              {% set existing_server = all_servers.get(hostname, {}) %}
+              {% set server_entry = existing_server | combine({
+                'ipmi_data': ipmi_data
+              }) %}
+              {% set all_servers = all_servers | combine({hostname: server_entry}) %}
+            {% endfor %}
+          {% endif %}
+          
+          {{ current_results | combine({'all_servers': all_servers}) }}
+      run_once: true
 
-            <div class="section">
-              <h2>Validation Summary</h2>
-              <p>This is a placeholder report - actual detailed results will be available in the full implementation.</p>
-              <p>Validation completed successfully with mock data.</p>
-            </div>
-
-            <div class="section">
-              <h2>OOBM Validation</h2>
-              <p>Status: <span class="success">Passed</span></p>
-            </div>
-
-            <div class="section">
-              <h2>IPMI Validation</h2>
-              <p>Status: <span class="success">Passed</span></p>
-            </div>
-          </body>
-          </html>
+    - name: Generate comprehensive main validation report
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/templates/main-validation-report.html.j2"
         dest: "{{ report_file }}"
+        mode: "0644"
+      vars:
+        # Pass all necessary data to the template
+        report_title: "Garden-Tiller Lab Validation Report"
+        generation_timestamp: "{{ report_start }}"
+        lab_environment: "{{ lab_environment | default('Garden-Tiller Production Lab') }}"
+      run_once: true
 
-    - name: Report file location
+    - name: Generate specialized network configuration report
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/templates/network-configuration-report.html.j2"
+        dest: "{{ report_dir }}/network-config-{{ timestamp }}.html"
+        mode: "0644"
+      vars:
+        generation_timestamp: "{{ report_start }}"
+        lab_environment: "{{ lab_environment | default('Garden-Tiller Production Lab') }}"
+      run_once: true
+      when: validation_results.network is defined
+
+    - name: Generate specialized firmware report (if firmware validation was run)
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/templates/firmware_report.html.j2"
+        dest: "{{ report_dir }}/firmware-validation-{{ timestamp }}.html"
+        mode: "0644"
+      vars:
+        generation_timestamp: "{{ report_start }}"
+        lab_environment: "{{ lab_environment | default('Garden-Tiller Production Lab') }}"
+      run_once: true
+      when: validation_results.firmware is defined
+
+    - name: Report generation completed
       ansible.builtin.debug:
-        msg: "Report generated at {{ report_file }}"
+        msg: 
+          - "=== Report Generation Complete ==="
+          - "Main validation report: {{ report_file }}"
+          - "Network configuration report: {{ report_dir }}/network-config-{{ timestamp }}.html"
+          - "Firmware validation report: {{ report_dir }}/firmware-validation-{{ timestamp }}.html"
+          - "Report timestamp: {{ timestamp }}"
+          - "All reports saved to: {{ report_dir }}/"
+      delegate_to: localhost
       run_once: true

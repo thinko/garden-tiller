@@ -92,7 +92,7 @@ class TestReportGenerator:
     def test_structlog_setup(self):
         """Test that Structlog setup works correctly"""
         logger = setup_logging(level="DEBUG")
-        self.assertIsNotNone(logger)
+        assert logger is not None
         
         # Test structured logging with contextual information
         logger.debug("Debug message", test_param="value")

@@ -151,7 +151,7 @@ class ReportGenerator:
             env = jinja2.Environment(
                 loader=jinja2.FileSystemLoader(self.template_dir)
             )
-            template = env.get_template("report_template.html")
+            template = env.get_template("main-validation-report.html")
             
             # Calculate summary stats
             total_checks = sum(
