@@ -1,0 +1,374 @@
+---
+# Garden-Tiller: Combined Data Collection and Detailed Baseline Report Generation
+# Collects hardware data and generates a comprehensive detailed report
+
+- name: Initialize validation process
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: always
+  tasks:
+    - name: Create reports directory
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../reports"
+        state: directory
+        mode: "0755"
+
+    - name: Set validation start time
+      ansible.builtin.set_fact:
+        validation_start_time: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+        report_file: "{{ playbook_dir }}/../reports/detailed-baseline-{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}.html"
+
+    - name: Initialize validation results dictionary
+      ansible.builtin.set_fact:
+        validation_results: {}
+        total_checks: 0
+        passed_checks: 0
+        failed_checks: 0
+        warning_checks: 0
+
+# Include HPE iLO validation
+- name: Verify HPE iLO configuration and details
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  tags: [oobm, hpe, ilo, all]
+  vars:
+    structlog_level: info
+    resilient_policy:
+      retry_count: 3
+      retry_delay: 2
+      circuit_threshold: 5
+    verify_ssl: false
+  tasks:
+    - name: Get HPE iLO hosts
+      ansible.builtin.set_fact:
+        hpe_hosts: "{{ groups['baremetal'] | map('extract', hostvars) | selectattr('bmc_type', 'equalto', 'ilo') | map(attribute='inventory_hostname') | list }}"
+
+    - name: Skip HPE validation if no hosts found
+      ansible.builtin.meta: end_play
+      when: hpe_hosts | length == 0
+
+    - name: Set up result dictionary for HPE iLO validation
+      ansible.builtin.set_fact:
+        hpe_oobm_results: {}
+
+    - name: Collect HPE iLO information using our Python module
+      block:
+        - name: Run iLO info collection script
+          ansible.builtin.shell: >
+            python3 {{ playbook_dir }}/../library/ilo_utils.py {{ hostvars[item].bmc_address }}
+            {{ hostvars[item].bmc_username }}
+            {{ hostvars[item].bmc_password }}
+            --ribcl 2>/dev/null || echo '{"error": "collection_failed"}'
+          register: ilo_info_results
+          loop: "{{ hpe_hosts }}"
+          ignore_errors: true
+
+        - name: Process iLO info results
+          ansible.builtin.shell: >
+            python3 {{ playbook_dir }}/../library/process_ilo_results.py 
+            '{{ ilo_info_results.results | to_json }}'
+            '{{ hostvars | to_json }}'
+          register: processed_ilo_results
+          failed_when: false
+
+        - name: Parse processed iLO results
+          ansible.builtin.set_fact:
+            hpe_oobm_results: "{{ processed_ilo_results.stdout | from_json }}"
+          when: processed_ilo_results.rc == 0
+
+      rescue:
+        - name: Handle iLO collection failure
+          ansible.builtin.set_fact:
+            hpe_oobm_results: {}
+
+    - name: Store HPE iLO validation results
+      ansible.builtin.set_fact:
+        validation_results: >-
+          {{ validation_results | combine({
+            'hpe_oobm': {
+              'start_time': validation_start_time,
+              'end_time': lookup('pipe', 'date "+%Y-%m-%d %H:%M:%S"'),
+              'results': hpe_oobm_results
+            }
+          }) }}
+
+# Collect hardware details via BMC APIs
+- name: Enhanced hardware data collection via BMC APIs
+  hosts: baremetal
+  gather_facts: true
+  tags: [hardware, bmc, all]
+  tasks:
+    - name: Collect comprehensive hardware data via BMC
+      ansible.builtin.script:
+        cmd: >
+          {{ playbook_dir }}/../library/ilo_utils.py 
+          {{ bmc_address }} 
+          {{ bmc_username }} 
+          {{ bmc_password }}
+          get_comprehensive_hardware_inventory_with_fallback
+          --redfish
+      register: ilo_hardware_info
+      failed_when: false
+      when: bmc_type is defined and bmc_type == 'ilo'
+
+    - name: Collect Dell iDRAC hardware data
+      ansible.builtin.script:
+        cmd: >
+          {{ playbook_dir }}/../library/idrac_utils.py 
+          {{ bmc_address }} 
+          {{ bmc_username }} 
+          {{ bmc_password }}
+      register: idrac_hardware_info
+      failed_when: false
+      no_log: true
+      when: bmc_type is defined and bmc_type == 'idrac'
+
+    - name: Parse BMC hardware information
+      ansible.builtin.set_fact:
+        bmc_hardware_data: >-
+          {{ 
+            (ilo_hardware_info.stdout | from_json) if (bmc_type == 'ilo' and ilo_hardware_info is defined and ilo_hardware_info.rc == 0 and ilo_hardware_info.stdout is defined) 
+            else (idrac_hardware_info.stdout | from_json) if (bmc_type == 'idrac' and idrac_hardware_info is defined and idrac_hardware_info.rc == 0 and idrac_hardware_info.stdout is defined)
+            else {
+              'collection_status': 'failed',
+              'error': 'BMC data collection failed',
+              'product_name': 'Unknown',
+              'power_status': 'Unknown', 
+              'firmware_version': 'Unknown',
+              'host_uuid': 'Unknown',
+              'boot_settings': {'one_time_boot': 'Unknown', 'persistent_boot': 'Unknown'},
+              'health_status': {'system_health': 'Unknown'},
+              'network_adapters': {'adapters': [], 'adapter_count': 0},
+              'hardware_summary': {
+                'server_manufacturer': 'Unknown',
+                'server_model': 'Unknown',
+                'total_processors': 0,
+                'total_memory_gb': 0,
+                'total_storage_devices': 0,
+                'total_network_adapters': 0,
+                'smartarray_controllers': 0,
+                'power_supplies': 0,
+                'fans': 0,
+                'hba_adapters': 0,
+                'usb_ports': 0
+              }
+            }
+          }}
+
+    - name: Attempt to collect additional data from XML endpoint (if available)
+      ansible.builtin.uri:
+        url: "https://{{ bmc_address }}/xmldata?item=all"
+        method: GET
+        validate_certs: false
+        timeout: 10
+        return_content: true
+      register: xml_data
+      failed_when: false
+      ignore_errors: true
+      when: bmc_type is defined and bmc_type == 'ilo'
+
+    - name: Parse XML endpoint data (if available)
+      ansible.builtin.set_fact:
+        xml_hardware_data: >-
+          {% if xml_data is defined and xml_data.status == 200 and xml_data.content is defined %}
+            {{ xml_data.content }}
+          {% else %}
+            ""
+          {% endif %}
+      when: xml_data is defined and xml_data.status == 200
+
+    - name: Collect network adapter information from target host (if SSH available)
+      block:
+        - name: Test SSH connectivity to target host
+          ansible.builtin.ping:
+          register: ssh_test
+          
+        - name: Collect network adapter information via SSH
+          ansible.builtin.shell: |
+            set -o pipefail
+            for dev in $(ls /sys/class/net/ | grep -v lo); do
+              if [ -d "/sys/class/net/$dev/device" ]; then
+                vendor=$(cat /sys/class/net/$dev/device/vendor 2>/dev/null || echo "Unknown")
+                device=$(cat /sys/class/net/$dev/device/device 2>/dev/null || echo "Unknown")
+                driver=$(readlink /sys/class/net/$dev/device/driver 2>/dev/null | sed 's/.*\///' || echo "Unknown")
+                echo "$dev:$vendor:$device:$driver"
+              fi
+            done
+          register: network_adapters_raw
+          failed_when: false
+          become: true
+          changed_when: false
+          when: ssh_test is succeeded
+
+        - name: Parse network adapter information
+          ansible.builtin.set_fact:
+            host_network_adapters: "{{ network_adapters | default([]) + [{'name': item.split(':')[0], 'vendor_id': item.split(':')[1], 'device_id': item.split(':')[2], 'driver': item.split(':')[3]}] }}"
+          loop: "{{ network_adapters_raw.stdout_lines | default([]) }}"
+          when: ssh_test is succeeded and network_adapters_raw.stdout_lines is defined
+
+      rescue:
+        - name: Log SSH collection failure - using BMC data only
+          ansible.builtin.debug:
+            msg: "SSH to target host failed - using BMC network adapter data only for {{ inventory_hostname }}"
+          
+        - name: Set network adapters from BMC data
+          ansible.builtin.set_fact:
+            host_network_adapters: "{{ bmc_hardware_data.network_adapters | default([]) }}"
+
+    - name: Create comprehensive host hardware summary
+      ansible.builtin.set_fact:
+        host_hardware_data:
+          hostname: "{{ inventory_hostname }}"
+          bmc_address: "{{ bmc_address | default('Unknown') }}"
+          bmc_type: "{{ bmc_type | default('Unknown') }}"
+          collection_timestamp: "{{ ansible_date_time.iso8601 }}"
+          bmc_data: "{{ bmc_hardware_data }}"
+          manufacturer: "{{ bmc_hardware_data.server_info.manufacturer | default(bmc_hardware_data.collection_metadata.manufacturer | default(ansible_system_vendor | default('Unknown'))) }}"
+          product_name: "{{ bmc_hardware_data.server_info.model | default(bmc_hardware_data.product_name | default('Unknown')) }}"
+          serial_number: "{{ bmc_hardware_data.server_info.serial_number | default(bmc_hardware_data.collection_metadata.serial_number | default(ansible_product_serial | default('Unknown'))) }}"
+          host_uuid: "{{ bmc_hardware_data.server_info.uuid | default(bmc_hardware_data.host_uuid | default('Unknown')) }}"
+          power_status: "{{ bmc_hardware_data.power_status | default('Unknown') }}"
+          firmware_version: "{{ bmc_hardware_data.bios.ilo_firmware | default(bmc_hardware_data.firmware_version | default('Unknown')) }}"
+          ilo_product: "{{ bmc_hardware_data.bios.ilo_product | default('Unknown') }}"
+          health_status: "{{ bmc_hardware_data.health_status | default({}) }}"
+          boot_settings: "{{ bmc_hardware_data.boot_settings | default({}) }}"
+          server_network_adapters: "{{ bmc_hardware_data.network_adapters.adapters | default([]) }}"
+          server_network_adapter_count: "{{ bmc_hardware_data.network_adapters.adapter_count | default(0) }}"
+          host_os_network_adapters: "{{ host_network_adapters | default([]) }}"
+          xml_data_available: "{{ xml_hardware_data is defined and xml_hardware_data | length > 0 }}"
+          xml_data_sample: "{{ xml_hardware_data[:500] if xml_hardware_data is defined and xml_hardware_data | length > 0 else '' }}"
+          # Enhanced hardware components
+          processors: "{{ bmc_hardware_data.processors | default({}) }}"
+          memory: "{{ bmc_hardware_data.memory | default({}) }}"
+          storage: "{{ bmc_hardware_data.storage | default({}) }}"
+          smartarray: "{{ bmc_hardware_data.smartarray | default({}) }}"
+          hba_adapters: "{{ bmc_hardware_data.hba_adapters | default({}) }}"
+          usb_devices: "{{ bmc_hardware_data.usb_devices | default({}) }}"
+          power_supplies: "{{ bmc_hardware_data.power_supplies | default({}) }}"
+          fans: "{{ bmc_hardware_data.fans | default({}) }}"
+          ilo_enhanced: "{{ bmc_hardware_data.ilo_enhanced | default({}) }}"
+          hardware_summary: "{{ bmc_hardware_data.hardware_summary | default({}) }}"
+          data_sources:
+            primary: "BMC API ({{ bmc_type | upper }})"
+            collection_method: "{{ bmc_hardware_data.collection_method | default('Unknown') }}"
+            collection_status: "{{ bmc_hardware_data.collection_status | default('Unknown') }}"
+            fallback_used: "{{ bmc_hardware_data.fallback_used | default(false) }}"
+            xml_endpoint: "{{ 'Available' if xml_data is defined and xml_data.status == 200 else 'Not available' }}"
+          local_system_details:
+            processor_count: "{{ ansible_processor_count | default('Unknown') }}"
+            processor_cores: "{{ ansible_processor_cores | default('Unknown') }}"
+            memory_mb: "{{ ansible_memtotal_mb | default('Unknown') }}"
+            architecture: "{{ ansible_architecture | default('Unknown') }}"
+            kernel: "{{ ansible_kernel | default('Unknown') }}"
+            os_family: "{{ ansible_os_family | default('Unknown') }}"
+
+# Generate detailed baseline report
+- name: Generate detailed baseline report
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [report, always]
+  vars:
+    firmware_output_dir: "{{ playbook_dir }}/../reports/firmware"
+    report_dir: "{{ playbook_dir }}/../reports"
+    timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+    report_file: "{{ report_dir }}/detailed-baseline-{{ timestamp }}.html"
+  tasks:
+    - name: Collect all host hardware data
+      ansible.builtin.set_fact:
+        all_hardware_data: "{{ groups['baremetal'] | map('extract', hostvars, 'host_hardware_data') | select('defined') | list }}"
+
+    - name: Consolidate server data from all collected information
+      ansible.builtin.set_fact:
+        consolidated_servers: {}
+
+    - name: Process hardware data for each host
+      ansible.builtin.set_fact:
+        consolidated_servers: >-
+          {{ consolidated_servers | combine({
+            item.hostname: {
+              'hostname': item.hostname,
+              'bmc_address': item.bmc_address,
+              'bmc_type': item.bmc_type,
+              'connection_status': 'success',
+              'manufacturer': item.manufacturer,
+              'product_name': item.product_name,
+              'serial_number': item.serial_number,
+              'collection_timestamp': item.collection_timestamp,
+              'server_details': {
+                'product_name': item.product_name,
+                'manufacturer': item.manufacturer,
+                'serial_number': item.serial_number,
+                'processor_count': item.local_system_details.processor_count,
+                'processor_cores': item.local_system_details.processor_cores,
+                'memory_mb': item.local_system_details.memory_mb,
+                'architecture': item.local_system_details.architecture
+              },
+              'bmc_raw_data': item.bmc_data,
+              'network_adapters': item.server_network_adapters,
+              'xml_data_available': item.xml_data_available,
+              'xml_data_sample': item.xml_data_sample,
+              'data_sources': item.data_sources,
+              'system_details': item.local_system_details,
+              'enhanced_hardware': {
+                'processors': item.processors,
+                'memory': item.memory,
+                'storage': item.storage,
+                'smartarray': item.smartarray,
+                'hba_adapters': item.hba_adapters,
+                'usb_devices': item.usb_devices,
+                'power_supplies': item.power_supplies,
+                'fans': item.fans,
+                'ilo_enhanced': item.ilo_enhanced,
+                'hardware_summary': item.hardware_summary
+              }
+            }
+          }) }}
+      loop: "{{ all_hardware_data }}"
+
+    - name: Merge HPE iLO data if available
+      ansible.builtin.set_fact:
+        consolidated_servers: >-
+          {{ consolidated_servers | combine({
+            item.key: consolidated_servers[item.key] | combine({
+              'health_status': item.value.health_status | default({}),
+              'boot_settings': item.value.boot_settings | default({}),
+              'power_validation': item.value.power_validation | default({}),
+              'firmware_validation': item.value.firmware_validation | default({}),
+              'health_validation': item.value.health_validation | default({}),
+              'boot_validation': item.value.boot_validation | default({}),
+              'network_validation': item.value.network_validation | default({}),
+              'connection_status': item.value.connection_status | default('unknown'),
+              'error_details': item.value.error_details | default({}) if item.value.connection_status == 'failed' else {}
+            })
+          }) }}
+      loop: "{{ validation_results.hpe_oobm.results.items() | list }}"
+      when: 
+        - validation_results.hpe_oobm is defined 
+        - validation_results.hpe_oobm.results is defined
+        - item.key in consolidated_servers
+
+    - name: Update validation results with consolidated server data
+      ansible.builtin.set_fact:
+        validation_results: "{{ validation_results | combine({'all_servers': consolidated_servers}) }}"
+
+    - name: Generate comprehensive detailed baseline report
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/templates/main-validation-report.html.j2"
+        dest: "{{ report_file }}"
+        mode: "0644"
+      vars:
+        report_title: "Garden-Tiller Lab Detailed Hardware Baseline Report"
+        generation_timestamp: "{{ validation_start_time }}"
+        lab_environment: "Garden-Tiller Production Lab"
+        show_detailed_data: true
+        show_raw_collections: true
+
+    - name: Report file location
+      ansible.builtin.debug:
+        msg: 
+          - "Detailed baseline report generated at: {{ report_file }}"
+          - "Report timestamp: {{ timestamp }}"
+          - "Total servers processed: {{ validation_results.all_servers.keys() | list | length if validation_results.all_servers is defined else 0 }}"

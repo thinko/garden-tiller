@@ -1,0 +1,274 @@
+---
+- name: Comprehensive BMC-Based Hardware Inventory Collection
+  hosts: all
+  gather_facts: yes
+  vars:
+    reports_dir: "{{ playbook_dir }}/../reports"
+    collection_timestamp: "{{ ansible_date_time.iso8601 }}"
+    
+  tasks:
+    - name: Debug playbook execution context
+      debug:
+        msg: |
+          Starting comprehensive BMC-based hardware inventory collection
+          Playbook: {{ playbook_dir }}/comprehensive-bmc-inventory.yaml
+          Reports directory: {{ reports_dir }}
+          Target hosts: {{ groups['all'] | join(', ') }}
+          Timestamp: {{ collection_timestamp }}
+
+    - name: Ensure reports directory exists
+      file:
+        path: "{{ reports_dir }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      run_once: true
+
+    - name: Initialize host inventory data structure
+      set_fact:
+        host_inventory: {}
+        collection_metadata:
+          collection_method: "BMC_API_Comprehensive"
+          collection_timestamp: "{{ collection_timestamp }}"
+          playbook: "comprehensive-bmc-inventory.yaml"
+
+    # ============================================
+    # HPE iLO Hardware Inventory Collection
+    # ============================================
+    
+    - name: Collect comprehensive HPE iLO hardware inventory
+      block:
+        - name: Get comprehensive hardware inventory via iLO APIs
+          script: ../library/ilo_utils.py "{{ oob_management_ip }}" "{{ ilo_username }}" "{{ ilo_password }}" get_comprehensive_hardware_inventory
+          register: ilo_hardware_inventory
+          when: 
+            - oob_management_ip is defined
+            - ilo_username is defined 
+            - ilo_password is defined
+            - bmc_type | default('unknown') | lower == 'ilo'
+
+        - name: Store comprehensive iLO hardware inventory
+          set_fact:
+            host_inventory: "{{ host_inventory | combine({'bmc_hardware_inventory': ilo_hardware_inventory.stdout | from_json}) }}"
+            collection_metadata: "{{ collection_metadata | combine({'bmc_type': 'iLO', 'collection_method': 'BMC_API_Comprehensive'}) }}"
+          when: 
+            - ilo_hardware_inventory is defined 
+            - ilo_hardware_inventory.stdout is defined
+            - ilo_hardware_inventory.rc == 0
+
+        - name: Fallback - Get basic iLO details if comprehensive inventory fails
+          script: ../library/ilo_utils.py "{{ oob_management_ip }}" "{{ ilo_username }}" "{{ ilo_password }}" get_all_details
+          register: ilo_basic_details
+          when: 
+            - oob_management_ip is defined
+            - ilo_username is defined 
+            - ilo_password is defined
+            - bmc_type | default('unknown') | lower == 'ilo'
+            - (ilo_hardware_inventory is not defined or ilo_hardware_inventory.rc != 0)
+
+        - name: Store basic iLO details as fallback
+          set_fact:
+            host_inventory: "{{ host_inventory | combine({'bmc_basic_details': ilo_basic_details.stdout | from_json}) }}"
+            collection_metadata: "{{ collection_metadata | combine({'bmc_type': 'iLO', 'collection_method': 'BMC_API_Basic_Fallback'}) }}"
+          when: 
+            - ilo_basic_details is defined
+            - ilo_basic_details.stdout is defined
+            - ilo_basic_details.rc == 0
+
+      rescue:
+        - name: Handle iLO collection errors
+          set_fact:
+            host_inventory: "{{ host_inventory | combine({'bmc_collection_error': ansible_failed_result.msg | default('Unknown iLO collection error')}) }}"
+            collection_metadata: "{{ collection_metadata | combine({'bmc_type': 'iLO', 'collection_method': 'BMC_API_Failed', 'error_occurred': true}) }}"
+
+      when: bmc_type | default('unknown') | lower == 'ilo'
+
+    # ============================================
+    # Dell iDRAC Hardware Inventory Collection (Placeholder)
+    # ============================================
+    
+    - name: Collect Dell iDRAC hardware inventory
+      block:
+        - name: Log iDRAC collection attempt
+          debug:
+            msg: "iDRAC comprehensive hardware inventory not yet implemented"
+
+        - name: Set iDRAC placeholder data
+          set_fact:
+            host_inventory: "{{ host_inventory | combine({'bmc_collection_error': 'iDRAC comprehensive inventory not yet implemented'}) }}"
+            collection_metadata: "{{ collection_metadata | combine({'bmc_type': 'iDRAC', 'collection_method': 'Not_Implemented'}) }}"
+
+      when: bmc_type | default('unknown') | lower == 'idrac'
+
+    # ============================================
+    # Generic BMC Fallback (for other BMC types)
+    # ============================================
+    
+    - name: Handle unknown or unsupported BMC types
+      set_fact:
+        host_inventory: "{{ host_inventory | combine({'bmc_collection_error': 'BMC type not supported: ' + (bmc_type | default('unknown'))}) }}"
+        collection_metadata: "{{ collection_metadata | combine({'bmc_type': bmc_type | default('unknown'), 'collection_method': 'Unsupported_BMC_Type', 'error_occurred': true}) }}"
+      when: 
+        - bmc_type | default('unknown') | lower not in ['ilo', 'idrac']
+
+    # ============================================
+    # XML Endpoint Fallback Collection
+    # ============================================
+    
+    - name: Try XML endpoint as fallback for hardware info
+      block:
+        - name: Check if anonymous XML endpoint is available (HPE specific)
+          uri:
+            url: "http://{{ ansible_host }}/xmldata?item=All"
+            method: GET
+            timeout: 10
+            status_code: [200, 401, 403, 404]
+          register: xml_endpoint_check
+          when: 
+            - ansible_host is defined
+            - bmc_type | default('unknown') | lower == 'ilo'
+
+        - name: Collect hardware info from XML endpoint
+          uri:
+            url: "http://{{ ansible_host }}/xmldata?item=All"
+            method: GET
+            timeout: 30
+          register: xml_hardware_data
+          when: 
+            - xml_endpoint_check is defined
+            - xml_endpoint_check.status_code is defined
+            - xml_endpoint_check.status_code == 200
+
+        - name: Parse and store XML hardware data
+          set_fact:
+            host_inventory: "{{ host_inventory | combine({'xml_endpoint_data': {'raw_xml': xml_hardware_data.content | default(''), 'collection_timestamp': collection_timestamp, 'endpoint_url': 'http://' + ansible_host + '/xmldata?item=All'}}) }}"
+          when: 
+            - xml_hardware_data is defined
+            - xml_hardware_data.content is defined
+
+      rescue:
+        - name: Handle XML endpoint collection errors
+          set_fact:
+            host_inventory: "{{ host_inventory | combine({'xml_endpoint_error': ansible_failed_result.msg | default('XML endpoint not available'), 'xml_endpoint_attempted': true}) }}"
+
+      when: 
+        - bmc_type | default('unknown') | lower == 'ilo'
+        - host_inventory.bmc_hardware_inventory is not defined
+
+    # ============================================
+    # Network Adapter Collection (SSH Fallback)
+    # ============================================
+    
+    - name: Collect network adapter info via SSH (if BMC doesn't provide sufficient detail)
+      block:
+        - name: Test SSH connectivity
+          ping:
+          register: ssh_connectivity
+
+        - name: Get network adapter information via SSH
+          setup:
+            gather_subset:
+              - 'network'
+          register: network_facts
+          when: ssh_connectivity is succeeded
+
+        - name: Store SSH network adapter information
+          set_fact:
+            host_inventory: "{{ host_inventory | combine({'ssh_network_adapters': {'interfaces': ansible_interfaces | default([]), 'collection_method': 'SSH_Ansible_Facts', 'collection_timestamp': collection_timestamp}}) }}"
+          when: 
+            - network_facts is defined
+            - ansible_interfaces is defined
+
+      rescue:
+        - name: Handle SSH network collection errors
+          set_fact:
+            host_inventory: "{{ host_inventory | combine({'ssh_network_error': ansible_failed_result.msg | default('SSH network collection failed'), 'ssh_attempted': true}) }}"
+
+      when: 
+        - host_inventory.bmc_hardware_inventory is not defined or
+          (host_inventory.bmc_hardware_inventory.network_adapters is defined and 
+           host_inventory.bmc_hardware_inventory.network_adapters.adapter_count | default(0) == 0)
+
+    # ============================================
+    # Data Validation and Summary
+    # ============================================
+    
+    - name: Analyze collection results and create summary
+      set_fact:
+        inventory_summary:
+          hostname: "{{ inventory_hostname }}"
+          ansible_host: "{{ ansible_host | default('N/A') }}"
+          oob_management_ip: "{{ oob_management_ip | default('N/A') }}"
+          bmc_type: "{{ bmc_type | default('unknown') }}"
+          collection_method: "{{ collection_metadata.collection_method }}"
+          data_sources_available: "{{ ['BMC_API'] if host_inventory.bmc_hardware_inventory is defined else [] + ['XML_Endpoint'] if host_inventory.xml_endpoint_data is defined else [] + ['SSH_Facts'] if host_inventory.ssh_network_adapters is defined else [] }}"
+          has_errors: "{{ true if (host_inventory.bmc_collection_error is defined or host_inventory.xml_endpoint_error is defined or host_inventory.ssh_network_error is defined) else false }}"
+          collection_timestamp: "{{ collection_timestamp }}"
+
+    - name: Display collection summary
+      debug:
+        msg: |
+          Hardware Inventory Collection Summary for {{ inventory_hostname }}:
+          - BMC Type: {{ inventory_summary.bmc_type }}
+          - Collection Method: {{ inventory_summary.collection_method }}
+          - Data Sources: {{ inventory_summary.data_sources_available | join(', ') }}
+          - Has Errors: {{ inventory_summary.has_errors }}
+
+    # ============================================
+    # Generate Individual Host Report
+    # ============================================
+    
+    - name: Generate comprehensive hardware inventory report for this host
+      template:
+        src: "{{ playbook_dir }}/templates/main-validation-report.html.j2"
+        dest: "{{ reports_dir }}/comprehensive-hardware-{{ inventory_hostname }}-{{ ansible_date_time.epoch }}.html"
+        mode: '0644'
+      delegate_to: localhost
+      vars:
+        report_title: "Comprehensive Hardware Inventory - {{ inventory_hostname }}"
+        report_timestamp: "{{ collection_timestamp }}"
+        report_host: "{{ inventory_hostname }}"
+        report_data: "{{ host_inventory }}"
+        report_summary: "{{ inventory_summary }}"
+        report_metadata: "{{ collection_metadata }}"
+
+    - name: Save raw inventory data as JSON
+      copy:
+        content: "{{ host_inventory | to_nice_json }}"
+        dest: "{{ reports_dir }}/hardware-inventory-{{ inventory_hostname }}-{{ ansible_date_time.epoch }}.json"
+        mode: '0644'
+      delegate_to: localhost
+
+    # ============================================
+    # Aggregate Data for Final Report
+    # ============================================
+    
+    - name: Add host data to global inventory
+      set_fact:
+        global_hardware_inventory: "{{ global_hardware_inventory | default({}) | combine({inventory_hostname: {'host_data': host_inventory, 'summary': inventory_summary, 'metadata': collection_metadata}}) }}"
+      delegate_to: localhost
+
+    - name: Generate consolidated hardware inventory report
+      template:
+        src: "{{ playbook_dir }}/templates/main-validation-report.html.j2"
+        dest: "{{ reports_dir }}/consolidated-hardware-inventory-{{ ansible_date_time.epoch }}.html"
+        mode: '0644'
+      delegate_to: localhost
+      run_once: true
+      vars:
+        report_title: "Consolidated Hardware Inventory Report"
+        report_timestamp: "{{ collection_timestamp }}"
+        all_hosts_data: "{{ global_hardware_inventory | default({}) }}"
+
+    - name: Display final report locations
+      debug:
+        msg: |
+          Hardware inventory collection completed!
+          
+          Individual Reports:
+          - HTML: {{ reports_dir }}/comprehensive-hardware-{{ inventory_hostname }}-{{ ansible_date_time.epoch }}.html
+          - JSON: {{ reports_dir }}/hardware-inventory-{{ inventory_hostname }}-{{ ansible_date_time.epoch }}.json
+          
+          Consolidated Report:
+          - HTML: {{ reports_dir }}/consolidated-hardware-inventory-{{ ansible_date_time.epoch }}.html
+      run_once: true

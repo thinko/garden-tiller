@@ -1,0 +1,10 @@
+{
+  "hpe_oobm_results": {{ hpe_results_dict | to_nice_json }},
+  "hpe_oobm_validation_start": "{{ hpe_oobm_validation_start }}",
+  "hpe_oobm_validation_end": "{{ ansible_date_time.iso8601 }}",
+  "hpe_power_passed": {{ hpe_power_passed }},
+  "hpe_firmware_passed": {{ hpe_firmware_passed }},
+  "hpe_health_passed": {{ hpe_health_passed }},
+  "hpe_boot_passed": {{ hpe_boot_passed }},
+  "hpe_hosts_count": {{ hpe_hosts | length }}
+}
