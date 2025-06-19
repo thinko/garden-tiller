@@ -4,150 +4,151 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Garden-Tiller Firmware Validation Report</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 40px; }
-        .header { background: #2c3e50; color: white; padding: 20px; border-radius: 5px; }
-        .summary { background: #f8f9fa; padding: 20px; margin: 20px 0; border-radius: 5px; }
-        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0; }
-        .stat-card { background: white; padding: 15px; border-radius: 5px; border-left: 4px solid #007bff; }
-        .stat-value { font-size: 2em; font-weight: bold; color: #007bff; }
-        .success { border-left-color: #28a745; }
-        .success .stat-value { color: #28a745; }
-        .warning { border-left-color: #ffc107; }
-        .warning .stat-value { color: #ffc107; }
-        .error { border-left-color: #dc3545; }
-        .error .stat-value { color: #dc3545; }
-        .host-table { width: 100%; border-collapse: collapse; margin: 20px 0; }
-        .host-table th, .host-table td { border: 1px solid #ddd; padding: 12px; text-align: left; }
-        .host-table th { background-color: #f2f2f2; font-weight: bold; }
-        .status-compliant { color: #28a745; font-weight: bold; }
-        .status-non-compliant { color: #dc3545; font-weight: bold; }
-        .status-skipped { color: #6c757d; font-style: italic; }
-    </style>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@patternfly/patternfly@6.2.3/patternfly.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@patternfly/patternfly@6.2.3/patternfly-addons.css" />
 </head>
-<body>
-    <div class="header">
-        <h1>🔧 Garden-Tiller Firmware Validation Report</h1>
-        <p>Generated: {{ report_timestamp | default('Unknown') }}</p>
-        <p>Validation Period: {{ start_time | default('Unknown') }} to {{ end_time | default('Unknown') }}</p>
-    </div>
+<body class="pf-v6-c-page">
+<div class="pf-v6-c-page__main-section pf-m-fill">
+    <section class="pf-v6-c-page__main-section pf-m-light">
+        <div class="pf-v6-c-content">
+            <h1 class="pf-v6-c-title pf-m-2xl">🔧 Garden-Tiller Firmware Validation Report</h1>
+            <p class="pf-v6-u-font-size-lg">Generated: {{ report_timestamp | default('Unknown') }}</p>
+            <p class="pf-v6-u-font-size-md">Validation Period: {{ start_time | default('Unknown') }} to {{ end_time | default('Unknown') }}</p>
+        </div>
+    </section>
 
-    <div class="summary">
-        <h2>📊 Firmware Compliance Summary</h2>
-        <div class="stats">
-            <div class="stat-card {{ 'success' if (firmware_summary.compliant_hosts | int) == (firmware_summary.analyzed_hosts | int) else 'warning' }}">
-                <h3>✅ Compliant Hosts</h3>
-                <div class="stat-value">{{ firmware_summary.compliant_hosts | default(0) }}</div>
-                <p>out of {{ firmware_summary.analyzed_hosts | default(0) }} analyzed</p>
+    <section class="pf-v6-c-page__main-section">
+        <div class="pf-v6-c-content">
+            <h2 class="pf-v6-c-title pf-m-xl">📊 Firmware Compliance Summary</h2>
+        </div>
+        <div class="pf-v6-l-gallery pf-m-gutter">
+            <div class="pf-v6-c-card">
+                <div class="pf-v6-c-card__title">✅ Compliant Hosts</div>
+                <div class="pf-v6-c-card__body">{{ firmware_summary.compliant_hosts | default(0) }}</div>
+                <div class="pf-v6-c-card__footer">out of {{ firmware_summary.analyzed_hosts | default(0) }} analyzed</div>
             </div>
-            <div class="stat-card {{ 'error' if (firmware_summary.non_compliant_hosts | default(0) | int) > 0 else 'success' }}">
-                <h3>❌ Non-Compliant Hosts</h3>
-                <div class="stat-value">{{ firmware_summary.non_compliant_hosts | default(0) }}</div>
-                <p>requiring updates</p>
+            <div class="pf-v6-c-card">
+                <div class="pf-v6-c-card__title">❌ Non-Compliant Hosts</div>
+                <div class="pf-v6-c-card__body">{{ firmware_summary.non_compliant_hosts | default(0) }}</div>
+                <div class="pf-v6-c-card__footer">requiring updates</div>
             </div>
-            <div class="stat-card">
-                <h3>📈 Compliance Rate</h3>
-                <div class="stat-value">{{ firmware_summary.compliance_rate | default(0) }}%</div>
-                <p>overall compliance</p>
+            <div class="pf-v6-c-card">
+                <div class="pf-v6-c-card__title">📈 Compliance Rate</div>
+                <div class="pf-v6-c-card__body">{{ firmware_summary.compliance_rate | default(0) }}%</div>
+                <div class="pf-v6-c-card__footer">overall compliance</div>
             </div>
-            <div class="stat-card {{ 'error' if (firmware_summary.total_critical_updates | default(0) | int) > 0 else 'success' }}">
-                <h3>🚨 Critical Updates</h3>
-                <div class="stat-value">{{ firmware_summary.total_critical_updates | default(0) }}</div>
-                <p>requiring immediate attention</p>
+            <div class="pf-v6-c-card">
+                <div class="pf-v6-c-card__title">🚨 Critical Updates</div>
+                <div class="pf-v6-c-card__body">{{ firmware_summary.total_critical_updates | default(0) }}</div>
+                <div class="pf-v6-c-card__footer">requiring immediate attention</div>
             </div>
         </div>
-    </div>
+    </section>
 
-    <div class="summary">
-        <h2>🔍 Component Analysis</h2>
-        <div class="stats">
-            <div class="stat-card">
-                <h3>📦 Total Components</h3>
-                <div class="stat-value">{{ firmware_summary.total_components | default(0) }}</div>
-                <p>analyzed across all hosts</p>
+    <section class="pf-v6-c-page__main-section">
+        <div class="pf-v6-c-content">
+            <h2 class="pf-v6-c-title pf-m-xl">🔍 Component Analysis</h2>
+        </div>
+        <div class="pf-v6-l-gallery pf-m-gutter">
+            <div class="pf-v6-c-card">
+                <div class="pf-v6-c-card__title">📦 Total Components</div>
+                <div class="pf-v6-c-card__body">{{ firmware_summary.total_components | default(0) }}</div>
+                <div class="pf-v6-c-card__footer">analyzed across all hosts</div>
             </div>
-            <div class="stat-card warning">
-                <h3>📥 Updates Available</h3>
-                <div class="stat-value">{{ firmware_summary.total_updates_required | default(0) }}</div>
-                <p>firmware updates needed</p>
+            <div class="pf-v6-c-card">
+                <div class="pf-v6-c-card__title">📥 Updates Available</div>
+                <div class="pf-v6-c-card__body">{{ firmware_summary.total_updates_required | default(0) }}</div>
+                <div class="pf-v6-c-card__footer">firmware updates needed</div>
             </div>
-            <div class="stat-card">
-                <h3>🏭 Total Hosts</h3>
-                <div class="stat-value">{{ firmware_summary.total_hosts | default(0) }}</div>
-                <p>in infrastructure</p>
+            <div class="pf-v6-c-card">
+                <div class="pf-v6-c-card__title">🏭 Total Hosts</div>
+                <div class="pf-v6-c-card__body">{{ firmware_summary.total_hosts | default(0) }}</div>
+                <div class="pf-v6-c-card__footer">in infrastructure</div>
             </div>
-            <div class="stat-card">
-                <h3>✅ Analyzed Hosts</h3>
-                <div class="stat-value">{{ firmware_summary.analyzed_hosts | default(0) }}</div>
-                <p>successfully processed</p>
+            <div class="pf-v6-c-card">
+                <div class="pf-v6-c-card__title">✅ Analyzed Hosts</div>
+                <div class="pf-v6-c-card__body">{{ firmware_summary.analyzed_hosts | default(0) }}</div>
+                <div class="pf-v6-c-card__footer">successfully processed</div>
             </div>
         </div>
-    </div>
+    </section>
 
     {% if all_firmware_results is defined and all_firmware_results | length > 0 %}
-    <div class="summary">
-        <h2>📋 Host-by-Host Firmware Status</h2>
-        <table class="host-table">
-            <thead>
-                <tr>
-                    <th>Hostname</th>
-                    <th>Compliance Status</th>
-                    <th>Total Components</th>
-                    <th>Updates Required</th>
-                    <th>Critical Updates</th>
-                    <th>Analysis Status</th>
+    <section class="pf-v6-c-page__main-section">
+        <div class="pf-v6-c-content">
+            <h2 class="pf-v6-c-title pf-m-xl">📋 Host-by-Host Firmware Status</h2>
+        </div>
+        <table class="pf-v6-c-table pf-m-grid-md" role="grid">
+            <thead class="pf-v6-c-table__thead">
+                <tr class="pf-v6-c-table__tr">
+                    <th class="pf-v6-c-table__th" role="columnheader">Hostname</th>
+                    <th class="pf-v6-c-table__th" role="columnheader">Compliance Status</th>
+                    <th class="pf-v6-c-table__th" role="columnheader">Total Components</th>
+                    <th class="pf-v6-c-table__th" role="columnheader">Updates Required</th>
+                    <th class="pf-v6-c-table__th" role="columnheader">Critical Updates</th>
+                    <th class="pf-v6-c-table__th" role="columnheader">Analysis Status</th>
                 </tr>
             </thead>
-            <tbody>
+            <tbody class="pf-v6-c-table__tbody">
                 {% for host in groups['baremetal'] %}
                 {% set host_result = hostvars[host].firmware_compliance | default({}) %}
-                <tr>
-                    <td><strong>{{ host }}</strong></td>
-                    <td class="status-{{ host_result.compliance_status | default('unknown') | lower | replace('_', '-') }}">
-                        {{ host_result.compliance_status | default('UNKNOWN') }}
+                <tr class="pf-v6-c-table__tr" role="row">
+                    <td class="pf-v6-c-table__td" role="cell" data-label="Hostname"><strong>{{ host }}</strong></td>
+                    <td class="pf-v6-c-table__td" role="cell" data-label="Compliance Status">
+                        {% set status = host_result.compliance_status | default('UNKNOWN') %}
+                        <span class="pf-v6-c-label {{ 'pf-m-green' if status == 'COMPLIANT' else 'pf-m-red' if status == 'NON_COMPLIANT' else 'pf-m-grey' }}">{{ status }}</span>
                     </td>
-                    <td>{{ host_result.total_components | default(0) }}</td>
-                    <td>{{ host_result.updates_required | default(0) }}</td>
-                    <td>{{ host_result.critical_updates | default(0) }}</td>
-                    <td class="status-{{ host_result.analysis_status | default('unknown') | lower }}">
-                        {{ host_result.analysis_status | default('unknown') | title }}
+                    <td class="pf-v6-c-table__td" role="cell" data-label="Total Components">{{ host_result.total_components | default(0) }}</td>
+                    <td class="pf-v6-c-table__td" role="cell" data-label="Updates Required">{{ host_result.updates_required | default(0) }}</td>
+                    <td class="pf-v6-c-table__td" role="cell" data-label="Critical Updates">{{ host_result.critical_updates | default(0) }}</td>
+                    <td class="pf-v6-c-table__td" role="cell" data-label="Analysis Status">
+                        {% set analysis_status = host_result.analysis_status | default('unknown') | title %}
+                        <span class="pf-v6-c-label {{ 'pf-m-green' if analysis_status == 'Completed' else 'pf-m-orange' if analysis_status == 'Skipped' else 'pf-m-grey' }}">{{ analysis_status }}</span>
                     </td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
-    </div>
+    </section>
     {% endif %}
 
-    <div class="summary">
-        <h2>🎯 Recommendations</h2>
+    <section class="pf-v6-c-page__main-section">
+        <div class="pf-v6-c-content">
+           <h2 class="pf-v6-c-title pf-m-xl">🎯 Recommendations</h2>
+        </div>
         {% if (firmware_summary.total_critical_updates | default(0) | int) > 0 %}
-        <div style="background: #f8d7da; color: #721c24; padding: 15px; border-radius: 5px; margin: 10px 0;">
-            <h3>🚨 Critical Action Required</h3>
-            <p><strong>{{ firmware_summary.total_critical_updates }} critical firmware updates</strong> require immediate attention. These may include BMC or BIOS updates that address security vulnerabilities or stability issues.</p>
+        <div class="pf-v6-c-alert pf-m-danger pf-m-inline" aria-label="Critical action required">
+            <div class="pf-v6-c-alert__icon"><i class="fas fa-exclamation-circle" aria-hidden="true"></i></div>
+            <h4 class="pf-v6-c-alert__title">Critical Action Required</h4>
+            <div class="pf-v6-c-alert__description">
+                <p><strong>{{ firmware_summary.total_critical_updates }} critical firmware updates</strong> require immediate attention. These may include BMC or BIOS updates that address security vulnerabilities or stability issues.</p>
+            </div>
         </div>
         {% endif %}
         
-        <ul>
-            {% if (firmware_summary.non_compliant_hosts | default(0) | int) > 0 %}
-            <li><strong>Priority:</strong> Update firmware on {{ firmware_summary.non_compliant_hosts }} non-compliant hosts</li>
-            {% endif %}
-            {% if (firmware_summary.total_updates_required | default(0) | int) > 0 %}
-            <li><strong>Schedule:</strong> Plan maintenance window for {{ firmware_summary.total_updates_required }} firmware updates</li>
-            {% endif %}
-            <li><strong>Verify:</strong> Test all firmware updates in development environment first</li>
-            <li><strong>Backup:</strong> Ensure configuration backups before applying updates</li>
-            <li><strong>Monitor:</strong> Verify system stability after firmware updates</li>
-            {% if (firmware_summary.compliance_rate | default(0) | int) == 100 %}
-            <li><strong>Maintenance:</strong> All systems compliant - continue regular firmware monitoring</li>
-            {% endif %}
-        </ul>
-    </div>
+        <div class="pf-v6-c-content">
+            <ul class="pf-v6-c-list">
+                {% if (firmware_summary.non_compliant_hosts | default(0) | int) > 0 %}
+                <li><strong>Priority:</strong> Update firmware on {{ firmware_summary.non_compliant_hosts }} non-compliant hosts</li>
+                {% endif %}
+                {% if (firmware_summary.total_updates_required | default(0) | int) > 0 %}
+                <li><strong>Schedule:</strong> Plan maintenance window for {{ firmware_summary.total_updates_required }} firmware updates</li>
+                {% endif %}
+                <li><strong>Verify:</strong> Test all firmware updates in development environment first</li>
+                <li><strong>Backup:</strong> Ensure configuration backups before applying updates</li>
+                <li><strong>Monitor:</strong> Verify system stability after firmware updates</li>
+                {% if (firmware_summary.compliance_rate | default(0) | int) == 100 %}
+                <li><strong>Maintenance:</strong> All systems compliant - continue regular firmware monitoring</li>
+                {% endif %}
+            </ul>
+        </div>
+    </section>
 
-    <footer style="margin-top: 40px; text-align: center; color: #666;">
+    <section class="pf-v6-c-page__main-section pf-m-light pf-v6-u-text-align-center pf-v6-u-py-xl">
         <p>Generated by Garden-Tiller Firmware Validation Suite</p>
         <p>Report Timestamp: {{ report_timestamp | default('Unknown') }}</p>
         <p>For technical support, consult the Garden-Tiller documentation</p>
-    </footer>
+    </section>
+</div>
 </body>
 </html>
