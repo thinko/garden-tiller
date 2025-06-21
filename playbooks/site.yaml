@@ -2,6 +2,10 @@
 # Garden-Tiller: OpenShift Lab Environment Validation Suite
 # Main playbook that orchestrates all validation steps
 
+- name: Process network discovery results and populate inventory
+  import_playbook: 00-process-discovery.yaml
+  tags: [discovery, always]
+
 - name: Initialize validation process
   hosts: localhost
   connection: local

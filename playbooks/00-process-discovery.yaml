@@ -1,0 +1,127 @@
+---
+- name: Process discovery data and add hosts to inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # Default path for the discovery JSON, can be overridden by discovery_json_file extra-var
+    # Assumes network_discovery_orchestrator.py writes to project_root/reports/discovery_output/inventory.json
+    # And this playbook is run from project_root (standard ansible-playbook behavior)
+    default_discovery_json_path: "{{ playbook_dir }}/../reports/discovery_output/inventory.json"
+
+  tasks:
+    - name: Determine discovery JSON file path
+      ansible.builtin.set_fact:
+        actual_discovery_json_file: "{{ discovery_json_file | default(default_discovery_json_path) }}"
+
+    - name: Show discovery JSON file path being used
+      ansible.builtin.debug:
+        msg: "Attempting to load discovery data from: {{ actual_discovery_json_file }}"
+
+    - name: Stat for discovery JSON file
+      ansible.builtin.stat:
+        path: "{{ actual_discovery_json_file }}"
+      register: discovery_file_stat
+
+    - name: Load discovery data from JSON file
+      ansible.builtin.set_fact:
+        lab_inventory: "{{ lookup('file', actual_discovery_json_file) | from_json }}"
+      when: discovery_file_stat.stat.exists and discovery_file_stat.stat.size > 0
+
+    - name: Handle missing or empty discovery JSON file
+      ansible.builtin.set_fact:
+        lab_inventory: { "hosts": [] } # Ensure lab_inventory.hosts exists and is empty
+      when: not discovery_file_stat.stat.exists or discovery_file_stat.stat.size == 0
+
+    - name: Display number of hosts found in JSON
+      ansible.builtin.debug:
+        msg: "Found {{ lab_inventory.hosts | length }} hosts in the discovery data."
+      when: lab_inventory.hosts is defined
+
+    - name: Add discovered live hosts to in-memory inventory
+      ansible.builtin.add_host:
+        name: "{{ item.ip_address }}" # This will be the inventory_hostname
+        groups: "discovered_hosts"
+        ansible_host: "{{ item.ip_address }}" # Explicitly set ansible_host
+        # Map useful discovered data as host variables
+        discovered_mac: "{{ item.mac_address | default(omit) }}"
+        discovered_vendor: "{{ item.vendor | default(omit) }}"
+        discovered_hostnames: "{{ item.hostnames | default(omit) }}"
+        discovered_os_info: "{{ item.os_info | default(omit) }}"
+        discovered_ports: "{{ item.ports | default(omit) }}"
+        is_idrac: "{{ item.is_idrac | default(false) | bool }}" # Ensure boolean
+        idrac_confidence_factors: "{{ item.idrac_confidence_factors | default(omit) }}"
+        ilo_info: "{{ item.ilo_info | default(omit) }}"
+        # Add any other top-level keys from item if needed
+      loop: "{{ lab_inventory.hosts | default([]) }}" # Loop over hosts, default to empty list if undefined
+      when: item.status | default('down') == 'up' # Process only 'up' hosts
+
+    - name: Report on dynamically added hosts
+      ansible.builtin.debug:
+        msg: "Dynamically added {{ groups['discovered_hosts'] | length }} hosts to 'discovered_hosts' group."
+      when: groups['discovered_hosts'] is defined
+
+
+# Example validation plays (Tasks 6.4 & 6.5)
+# These would typically be in separate, more specific playbooks or roles.
+# For this exercise, they are included here to demonstrate usage.
+
+- name: Example Validations on Discovered Hosts
+  hosts: discovered_hosts # Target the dynamically added 'discovered_hosts' group
+  gather_facts: false # Usually false for network devices or if facts are not needed
+  become: false # Validations typically don't need privilege escalation on the target
+
+  tasks:
+    - name: Display hostvars for a discovered host (for debugging)
+      ansible.builtin.debug:
+        var: hostvars[inventory_hostname]
+      when: inventory_hostname == (groups['discovered_hosts'] | first | default('')) # Show for first host only
+
+    # Task 6.4: Verify SSH version on discovered hosts (Conceptual Example)
+    # A real SSH version check would involve connecting via SSH or checking a banner.
+    # This example checks if port 22 is open and if 'OpenSSH' is in service product.
+    - name: Check for OpenSSH service on port 22
+      ansible.builtin.set_fact:
+        ssh_service_info: "{{ item }}"
+      loop: "{{ hostvars[inventory_hostname].discovered_ports | default([]) }}"
+      when:
+        - item.port_id == 22
+        - item.state == 'open'
+        - item.service is defined
+        - item.service.product is defined
+        - "OpenSSH" in item.service.product
+      register: openssh_check_results # This will be a list of results, one per host
+
+    - name: Report OpenSSH service status
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} has OpenSSH on port 22: {{ hostvars[inventory_hostname].ssh_service_info.service.product }} {{ hostvars[inventory_hostname].ssh_service_info.service.version | default('') }}"
+      when: hostvars[inventory_hostname].ssh_service_info is defined and hostvars[inventory_hostname].ssh_service_info.port_id is defined
+
+
+    # Task 6.5: Verify Firmware on Discovered HP iLO Devices (Conceptual Example)
+    # This task checks if iLO firmware information was populated from Nmap data.
+    # A real firmware validation would involve connecting to the iLO and querying it.
+    - name: Check for discovered HP iLO firmware information
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} is HP iLO. Discovered Firmware: {{ hostvars[inventory_hostname].ilo_info.ILOFirmwareVersion | default('Not available') }}"
+      when:
+        - hostvars[inventory_hostname].ilo_info is defined
+        - hostvars[inventory_hostname].ilo_info.ILOFirmwareVersion is defined # Check specific key from parser
+        - "'Hewlett Packard' in (hostvars[inventory_hostname].discovered_vendor | default(''))"
+
+    - name: Assert iLO firmware data is present (example assertion)
+      ansible.builtin.assert:
+        that:
+          - hostvars[inventory_hostname].ilo_info.ILOFirmwareVersion is defined
+        fail_msg: "iLO firmware version not found in discovery data for {{ inventory_hostname }}."
+        success_msg: "iLO firmware version IS PRESENT in discovery data for {{ inventory_hostname }}."
+      when:
+        - hostvars[inventory_hostname].ilo_info is defined
+        - "'Hewlett Packard' in (hostvars[inventory_hostname].discovered_vendor | default(''))"
+        # This only asserts data presence from Nmap, not live verification.
+
+    # Example for iDRAC (similar to iLO, checking for data presence)
+    - name: Check for discovered Dell iDRAC
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} is identified as Dell iDRAC."
+      when: hostvars[inventory_hostname].is_idrac | bool

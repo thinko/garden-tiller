@@ -139,6 +139,70 @@ Run HPE-specific validations with:
 ./check-lab.sh --inventory inventories/my-lab/hosts.yaml --tags hpe,ilo
 ```
 
+## Automated Network Discovery
+
+Garden-Tiller includes a Python-based Network Discovery Orchestrator to automate the initial phases of network reconnaissance and inventory generation. This script performs a series of passive and active scans to identify live hosts, open ports, services, operating systems, and potential Out-of-Band Management (OOBM) interfaces like Dell iDRACs and HP iLOs.
+
+The output is a structured `inventory.json` file, which can then be automatically ingested by the main `site.yaml` playbook to populate Ansible's in-memory inventory for subsequent validation tasks.
+
+### Features
+
+- **Phased Discovery:** Progresses from passive listening (`tcpdump`, `tshark`) to local active probing (`arp-scan`), and finally to comprehensive network-wide scanning (`nmap`).
+- **OOBM Identification:** Specifically attempts to identify Dell iDRAC and HP iLO interfaces based on Nmap scan results.
+- **JSON Output:** Generates a detailed `inventory.json` file tailored for consumption by Garden-Tiller's Ansible playbooks.
+- **Configurable:** Allows specification of network interface, scan durations, target subnets for list scans, and options to skip specific phases or use existing Nmap XML data.
+
+### Usage
+
+The script `scripts/network_discovery_orchestrator.py` can be run directly. It typically requires root privileges for some scanning operations (like `tcpdump` and `arp-scan`, and Nmap's OS detection).
+
+**Basic execution:**
+
+```bash
+sudo python3 scripts/network_discovery_orchestrator.py --interface eth0
+```
+
+This will run the full pipeline using `eth0`, with default settings, and produce output files (including `inventory.json`) in `reports/discovery_output/`.
+
+**Command-line Options:**
+
+```
+usage: network_discovery_orchestrator.py [-h] [--interface INTERFACE] [--output-dir OUTPUT_DIR] [--tcpdump-duration TCPDUMP_DURATION]
+                                         [--skip-pcap] [--skip-arp] [--nmap-list-scan-targets NMAP_LIST_SCAN_TARGETS]
+                                         [--skip-nmap-list-scan] [--skip-nmap-ping-scan]
+                                         [--nmap-xml-input NMAP_XML_INPUT] [--skip-ansible-trigger] [-v]
+
+Network Discovery Orchestrator for Garden-Tiller
+
+options:
+  -h, --help            show this help message and exit
+  --interface INTERFACE, -i INTERFACE
+                        Network interface for scanning (default: eth0)
+  --output-dir OUTPUT_DIR, -o OUTPUT_DIR
+                        Directory for output files (default: reports/discovery_output)
+  --tcpdump-duration TCPDUMP_DURATION, -d TCPDUMP_DURATION
+                        Duration for tcpdump capture in seconds (default: 120)
+  --skip-pcap           Skip PCAP capture and analysis phase.
+  --skip-arp            Skip ARP scan phase.
+  --nmap-list-scan-targets NMAP_LIST_SCAN_TARGETS
+                        Target subnet range for Nmap list scan (e.g., '192.168.1.0/24'). Optional.
+  --skip-nmap-list-scan
+                        Skip Nmap list scan phase (-sL).
+  --skip-nmap-ping-scan
+                        Skip Nmap ping scan phase (-sn).
+  --nmap-xml-input NMAP_XML_INPUT
+                        Path to an existing Nmap XML file to use instead of live scanning (for testing).
+  --skip-ansible-trigger
+                        Skip the final step of triggering the Ansible playbook.
+  -v, --verbose         Enable verbose logging (DEBUG level).
+```
+
+**Integration with Main Playbook:**
+
+When the orchestrator completes and generates `inventory.json`, it can automatically trigger the main `playbooks/site.yaml`. The `00-process-discovery.yaml` playbook (imported by `site.yaml`) will then load this JSON file to dynamically add discovered hosts to Ansible's inventory for the current run.
+
+This automated discovery process is particularly useful for bootstrapping inventory in new or unknown lab environments.
+
 ## Testing BMC Connectivity
 
 BMC connectivity can be tested using the standard playbooks:
