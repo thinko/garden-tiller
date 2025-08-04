@@ -43,12 +43,16 @@ ENV/
 .DS_Store
 *.sublime-workspace
 *.sublime-project
-
+_dev_*
 # Project specific
+perftesting/
 logs/
-reports/
+reports/*.html
+reports/*.md
+reports/firmware/*.html
 *.log
 results/
+censor-it.sh
 
 # Container files
 .container-*

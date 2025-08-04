@@ -150,19 +150,44 @@ if [ $USE_PODMAN -eq 1 ]; then
         --network host \
         localhost/garden-tiller:latest \
         ${ANSIBLE_OPTS} playbooks/site.yaml 2>&1 | tee -a "${LOG_FILE}"
+    # Get exit code from podman (first command in pipeline)
+    EXIT_CODE=${PIPESTATUS[0]}
 else
     echo -e "${BLUE}Running validations...${NC}"
     ${ANSIBLE_CMD} ${ANSIBLE_OPTS} playbooks/site.yaml 2>&1 | tee -a "${LOG_FILE}"
+    # Get exit code from ansible-playbook (first command in pipeline)  
+    EXIT_CODE=${PIPESTATUS[0]}
 fi
 
-# Check exit status
-EXIT_CODE=$?
+# Check exit status and look for actual report files
+REPORT_DIR="./reports"
+
+
 if [ $EXIT_CODE -eq 0 ]; then
     echo -e "${GREEN}Validation completed successfully!${NC}"
-    echo -e "${GREEN}Check the report at ./reports/lab-report-$(date +%Y%m%d_%H%M%S).html${NC}"
+    
+    # Find the most recent report file
+    if [ -d "$REPORT_DIR" ]; then
+        LATEST_REPORT=$(find "$REPORT_DIR" -name "lab-report-*.html" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+        if [ -n "$LATEST_REPORT" ] && [ -f "$LATEST_REPORT" ]; then
+            echo -e "${GREEN}Check the report at ${LATEST_REPORT}${NC}"
+        else
+            echo -e "${YELLOW}No report file found in ${REPORT_DIR}. This may indicate an issue with report generation.${NC}"
+        fi
+    else
+        echo -e "${YELLOW}Reports directory not found. Report generation may have failed.${NC}"
+    fi
 else
     echo -e "${RED}Validation failed with exit code ${EXIT_CODE}${NC}"
     echo -e "${RED}Please check the log file for details: ${LOG_FILE}${NC}"
+    
+    # Check if partial results were generated
+    if [ -d "$REPORT_DIR" ]; then
+        LATEST_REPORT=$(find "$REPORT_DIR" -name "lab-report-*.html" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+        if [ -n "$LATEST_REPORT" ] && [ -f "$LATEST_REPORT" ]; then
+            echo -e "${YELLOW}A partial report may be available at ${LATEST_REPORT}${NC}"
+        fi
+    fi
 fi
 
 exit $EXIT_CODE

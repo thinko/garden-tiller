@@ -1,0 +1,314 @@
+---
+# Garden-Tiller: Firmware Update Validation Playbook (Garden Shed Enhanced)
+# Uses centralized garden_shed data to validate and recommend firmware updates
+
+- name: Firmware validation using Garden Shed data
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  tags: [firmware, all]
+  vars:
+    structlog_level: info
+    # Minimum firmware baselines (can be overridden by inventory)
+    firmware_baselines:
+      hpe:
+        ilo: "2.70"
+        bios: "P89"
+        system_rom: "P89"
+      dell:
+        idrac: "4.00"
+        bios: "2.0"
+        system_bios: "2.0"
+  tasks:
+    - name: Register validation start
+      ansible.builtin.set_fact:
+        firmware_validation_start: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      run_once: true
+
+    - name: Initialize check counters for standalone execution
+      ansible.builtin.set_fact:
+        total_checks: "{{ total_checks | default(0) }}"
+        passed_checks: "{{ passed_checks | default(0) }}"
+        failed_checks: "{{ failed_checks | default(0) }}"
+        warning_checks: "{{ warning_checks | default(0) }}"
+      run_once: true
+
+    - name: Check for available Garden Shed firmware data
+      ansible.builtin.debug:
+        msg:
+          - "Checking for Garden Shed firmware data..."
+          - "Firmware data type: {{ firmware_data | type_debug if firmware_data is defined else 'undefined' }}"
+          - "Available hosts with firmware data: {{ firmware_data.keys() | list if firmware_data is defined and firmware_data is mapping else 'None or invalid type' }}"
+      run_once: true
+
+    - name: Validate firmware data availability
+      ansible.builtin.fail:
+        msg: "Garden Shed firmware data not available. Please run data collection first (00-data-collection-garden-shed.yaml)"
+      when: firmware_data is not defined or not (firmware_data is mapping) or firmware_data | length == 0
+      run_once: true
+
+    # Process firmware validation from Garden Shed data
+    - name: Process firmware validation from Garden Shed data
+      ansible.builtin.set_fact:
+        firmware_results: >-
+          {%- set processed_results = {} -%}
+          {%- for host_name, fw_data in firmware_data.items() -%}
+            {%- set host_vendor = hardware_summary[host_name].manufacturer.lower() if host_name in hardware_summary else 'unknown' -%}
+            {%- set bmc_type = hostvars[host_name].bmc_type | default('unknown') -%}
+            {%- set current_bios = fw_data.bios_version -%}
+            {%- set system_bmc = fw_data.system_bmc -%}
+            {%- set system_rom_active = fw_data.system_rom_active -%}
+            {%- set other_firmware = fw_data.other_firmware -%}
+            
+            {%- set firmware_assessments = [] -%}
+            {%- set update_recommendations = [] -%}
+            {%- set critical_updates = [] -%}
+            
+            {%- if 'hpe' in host_vendor or 'hewlett' in host_vendor -%}
+              {%- set baseline = firmware_baselines.hpe -%}
+              {%- if system_bmc | length > 0 -%}
+                {%- set current_ilo = system_bmc[0].get('VersionString', system_bmc[0].get('Version', 'Unknown')) if system_bmc[0] is mapping else 'Unknown' -%}
+                {%- set ilo_needs_update = current_ilo != 'Unknown' and current_ilo is version(baseline.ilo, '<') -%}
+                {%- set _ = firmware_assessments.append({
+                  'component': 'iLO',
+                  'current_version': current_ilo,
+                  'baseline_version': baseline.ilo,
+                  'needs_update': ilo_needs_update,
+                  'severity': 'high' if ilo_needs_update else 'none'
+                }) -%}
+                {%- if ilo_needs_update -%}
+                  {%- set _ = update_recommendations.append('iLO firmware update recommended: ' + current_ilo + ' -> ' + baseline.ilo) -%}
+                  {%- set _ = critical_updates.append('iLO') -%}
+                {%- endif -%}
+              {%- endif -%}
+              
+              {%- if current_bios != 'Unknown' -%}
+                {%- set bios_needs_update = baseline.bios not in current_bios -%}
+                {%- set _ = firmware_assessments.append({
+                  'component': 'BIOS',
+                  'current_version': current_bios,
+                  'baseline_version': baseline.bios,
+                  'needs_update': bios_needs_update,
+                  'severity': 'medium' if bios_needs_update else 'none'
+                }) -%}
+                {%- if bios_needs_update -%}
+                  {%- set _ = update_recommendations.append('BIOS firmware update may be needed: ' + current_bios) -%}
+                {%- endif -%}
+              {%- endif -%}
+            {%- elif 'dell' in host_vendor -%}
+              {%- set baseline = firmware_baselines.dell -%}
+              {%- if system_bmc | length > 0 -%}
+                {%- set current_idrac = system_bmc[0].get('VersionString', system_bmc[0].get('Version', 'Unknown')) if system_bmc[0] is mapping else 'Unknown' -%}
+                {%- set idrac_needs_update = current_idrac != 'Unknown' and current_idrac is version(baseline.idrac, '<') -%}
+                {%- set _ = firmware_assessments.append({
+                  'component': 'iDRAC',
+                  'current_version': current_idrac,
+                  'baseline_version': baseline.idrac,
+                  'needs_update': idrac_needs_update,
+                  'severity': 'high' if idrac_needs_update else 'none'
+                }) -%}
+                {%- if idrac_needs_update -%}
+                  {%- set _ = update_recommendations.append('iDRAC firmware update recommended: ' + current_idrac + ' -> ' + baseline.idrac) -%}
+                  {%- set _ = critical_updates.append('iDRAC') -%}
+                {%- endif -%}
+              {%- endif -%}
+            {%- endif -%}
+            
+            {%- for firmware_item in other_firmware -%}
+              {%- if firmware_item is mapping and 'Name' in firmware_item -%}
+                {%- set fw_name = firmware_item.Name.lower() -%}
+                {%- set fw_version = firmware_item.get('VersionString', firmware_item.get('Version', 'Unknown')) -%}
+                {%- if 'network' in fw_name or 'nic' in fw_name or 'ethernet' in fw_name -%}
+                  {%- set _ = firmware_assessments.append({
+                    'component': 'Network Adapter',
+                    'name': firmware_item.Name,
+                    'current_version': fw_version,
+                    'needs_update': false,
+                    'severity': 'low'
+                  }) -%}
+                {%- elif 'storage' in fw_name or 'raid' in fw_name or 'sas' in fw_name -%}
+                  {%- set _ = firmware_assessments.append({
+                    'component': 'Storage Controller',
+                    'name': firmware_item.Name,
+                    'current_version': fw_version,
+                    'needs_update': false,
+                    'severity': 'medium'
+                  }) -%}
+                {%- endif -%}
+              {%- endif -%}
+            {%- endfor -%}
+            
+            {%- set overall_status = 'pass' if critical_updates | length == 0 else ('warn' if update_recommendations | length > 0 else 'fail') -%}
+            
+            {%- set _ = processed_results.update({
+              host_name: {
+                'hostname': host_name,
+                'bmc_address': garden_shed_data[host_name].bmc_address if host_name in garden_shed_data else 'Unknown',
+                'vendor': host_vendor,
+                'collection_status': 'success',
+                'collection_method': 'garden_shed',
+                'timestamp': ansible_date_time.iso8601,
+                'firmware_inventory': {
+                  'bios_version': current_bios,
+                  'system_bmc': system_bmc,
+                  'system_rom_active': system_rom_active,
+                  'other_firmware_count': other_firmware | length,
+                  'assessments': firmware_assessments
+                },
+                'update_analysis': {
+                  'needs_critical_updates': critical_updates | length > 0,
+                  'critical_components': critical_updates,
+                  'total_recommendations': update_recommendations | length,
+                  'recommendations': update_recommendations,
+                  'risk_level': 'high' if critical_updates | length > 0 else ('medium' if update_recommendations | length > 0 else 'low')
+                },
+                'validation': {
+                  'has_firmware_inventory': firmware_assessments | length > 0,
+                  'bmc_current': critical_updates | length == 0,
+                  'bios_identified': current_bios != 'Unknown',
+                  'status': overall_status
+                }
+              }
+            }) -%}
+          {%- endfor -%}
+          {{ processed_results }}
+      run_once: true
+
+    # Handle hosts without Garden Shed data (fallback)
+    - name: Identify hosts without Garden Shed firmware data
+      ansible.builtin.set_fact:
+        missing_firmware_hosts: >-
+          {{ groups['baremetal'] | difference(firmware_data.keys() | list) }}
+      run_once: true
+
+    - name: Add entries for hosts without firmware data
+      ansible.builtin.set_fact:
+        firmware_results: >-
+          {%- set current_results = firmware_results -%}
+          {%- for host_name in missing_firmware_hosts -%}
+            {%- set _ = current_results.update({
+              host_name: {
+                'hostname': host_name,
+                'bmc_address': hostvars[host_name].bmc_address | default('Unknown'),
+                'vendor': 'unknown',
+                'collection_status': 'failed',
+                'collection_method': 'garden_shed_fallback',
+                'error': 'No firmware data available from Garden Shed collection',
+                'timestamp': ansible_date_time.iso8601,
+                'firmware_inventory': {},
+                'update_analysis': {
+                  'needs_critical_updates': true,
+                  'critical_components': [],
+                  'total_recommendations': 0,
+                  'recommendations': ['Data collection failed - manual firmware check required'],
+                  'risk_level': 'unknown'
+                },
+                'validation': {
+                  'has_firmware_inventory': false,
+                  'bmc_current': false,
+                  'bios_identified': false,
+                  'status': 'fail'
+                }
+              }
+            }) -%}
+          {%- endfor -%}
+          {{ current_results }}
+      when: missing_firmware_hosts | length > 0
+      run_once: true
+
+    # Validation and reporting
+    - name: Calculate firmware validation statistics
+      ansible.builtin.set_fact:
+        firmware_success_count: >-
+          {{ firmware_results | dict2items | 
+             selectattr('value.validation.status', 'equalto', 'pass') | 
+             list | length }}
+        firmware_warning_count: >-
+          {{ firmware_results | dict2items | 
+             selectattr('value.validation.status', 'equalto', 'warn') | 
+             list | length }}
+        firmware_failure_count: >-
+          {{ firmware_results | dict2items | 
+             selectattr('value.validation.status', 'equalto', 'fail') | 
+             list | length }}
+        critical_updates_needed: >-
+          {{ firmware_results | dict2items | 
+             selectattr('value.update_analysis.needs_critical_updates', 'equalto', true) | 
+             list | length }}
+        total_recommendations: >-
+          {{ firmware_results | dict2items | 
+             map(attribute='value.update_analysis.total_recommendations') | 
+             sum }}
+      run_once: true
+
+    - name: Display firmware validation summary
+      ansible.builtin.debug:
+        msg:
+          - "Firmware Validation Summary:"
+          - "Total hosts: {{ firmware_results.keys() | list | length }}"
+          - "Passed (current firmware): {{ firmware_success_count }}"
+          - "Warnings (updates recommended): {{ firmware_warning_count }}"
+          - "Failed (data collection issues): {{ firmware_failure_count }}"
+          - "Hosts needing critical updates: {{ critical_updates_needed }}"
+          - "Total update recommendations: {{ total_recommendations }}"
+      run_once: true
+
+    - name: Display hosts needing critical firmware updates
+      ansible.builtin.debug:
+        msg: 
+          - "Host: {{ item.key }}"
+          - "Vendor: {{ item.value.vendor }}"
+          - "Critical components needing updates: {{ item.value.update_analysis.critical_components | join(', ') }}"
+          - "Risk level: {{ item.value.update_analysis.risk_level }}"
+          - "Recommendations:"
+          - "{{ item.value.update_analysis.recommendations }}"
+      loop: "{{ firmware_results | dict2items }}"
+      when: item.value.update_analysis.needs_critical_updates
+
+    - name: Display detailed firmware inventory for current systems
+      ansible.builtin.debug:
+        msg: 
+          - "Host: {{ item.key }}"
+          - "BIOS Version: {{ item.value.firmware_inventory.bios_version | default('Unknown') }}"
+          - "BMC/iLO Version: {{ item.value.firmware_inventory.system_bmc[0].VersionString | default(item.value.firmware_inventory.system_bmc[0].Version | default('Unknown')) if (item.value.firmware_inventory.system_bmc | length > 0 and item.value.firmware_inventory.system_bmc[0] is mapping) else 'Unknown' }}"
+          - "Other firmware components: {{ item.value.firmware_inventory.other_firmware_count | default(0) }}"
+          - "Status: {{ item.value.validation.status | default('unknown') }}"
+      loop: "{{ firmware_results | dict2items }}"
+      when: 
+        - item.value.validation.status is defined
+        - item.value.validation.status == 'pass'
+
+    - name: Register firmware validation end
+      ansible.builtin.set_fact:
+        firmware_validation_end: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      run_once: true
+
+    - name: Store firmware validation results
+      ansible.builtin.set_fact:
+        validation_results: >-
+          {{ (validation_results | default({}) if validation_results is mapping else {}) | combine({
+            'firmware_validation': {
+              'start_time': firmware_validation_start,
+              'end_time': firmware_validation_end,
+              'results': firmware_results,
+              'baselines_used': firmware_baselines,
+              'summary': {
+                'total_hosts': firmware_results.keys() | list | length,
+                'passed': firmware_success_count | int,
+                'warnings': firmware_warning_count | int,
+                'failed': firmware_failure_count | int,
+                'critical_updates_needed': critical_updates_needed | int,
+                'total_recommendations': total_recommendations | int
+              }
+            }
+          }) }}
+      run_once: true
+
+    # Update check counters for final report
+    - name: Update check counters
+      ansible.builtin.set_fact:
+        total_checks: "{{ total_checks | int + (firmware_results.keys() | list | length) }}"
+        passed_checks: "{{ passed_checks | int + (firmware_success_count | int) }}"
+        failed_checks: "{{ failed_checks | int + (firmware_failure_count | int) }}"
+        warning_checks: "{{ warning_checks | int + (firmware_warning_count | int) }}"
+      run_once: true

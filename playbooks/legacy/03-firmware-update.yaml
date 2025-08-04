@@ -1,0 +1,325 @@
+---
+# Garden-Tiller: Enhanced Firmware Update Validation Playbook
+# Comprehensive firmware validation, baseline comparison, and update orchestration
+
+- name: Enhanced firmware validation and update management
+  hosts: baremetal
+  gather_facts: true
+  tags: [firmware, all]
+  vars:
+    structlog_level: info
+    firmware_baseline_file: "{{ playbook_dir }}/../config/firmware_baselines.yaml"
+    firmware_output_dir: "{{ playbook_dir }}/../reports/firmware"
+    perform_updates: false  # Set to true to actually perform updates
+    update_required_only: true  # Only update components below minimum version
+
+  tasks:
+    - name: Register validation start
+      ansible.builtin.set_fact:
+        firmware_validation_start: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      run_once: true
+
+    - name: Create firmware output directory
+      ansible.builtin.file:
+        path: "{{ firmware_output_dir }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Configure Structlog logger for firmware validation
+      ansible.builtin.debug:
+        msg: "Starting enhanced firmware validation at level: {{ structlog_level }}"
+
+    # Collect BMC information for firmware inventory
+    - name: Collect Dell iDRAC information
+      ansible.builtin.script:
+        cmd: "{{ playbook_dir }}/../library/idrac_utils.py {{ bmc_address }} {{ bmc_username }} {{ bmc_password }}"
+      register: idrac_info
+      when: bmc_type is defined and bmc_type == 'idrac'
+      failed_when: false
+      no_log: true  # Protect credentials
+
+    - name: Collect HPE iLO information  
+      ansible.builtin.script:
+        cmd: "{{ playbook_dir }}/../library/ilo_utils.py {{ bmc_address }} {{ bmc_username }} {{ bmc_password }}"
+      register: ilo_info
+      when: bmc_type is defined and bmc_type == 'ilo'
+      failed_when: false
+      no_log: true  # Protect credentials
+
+    - name: Parse BMC information
+      ansible.builtin.set_fact:
+        bmc_info: >-
+          {% if bmc_type is defined and bmc_type == 'idrac' and idrac_info is defined and idrac_info.rc is defined and idrac_info.rc == 0 and idrac_info.stdout is defined %}
+            {{ idrac_info.stdout | from_json }}
+          {% elif bmc_type is defined and bmc_type == 'ilo' and ilo_info is defined and ilo_info.rc is defined and ilo_info.rc == 0 and ilo_info.stdout is defined %}
+            {{ ilo_info.stdout | from_json }}
+          {% else %}
+            {}
+          {% endif %}
+
+    # Collect additional hardware information
+    - name: Gather system information
+      ansible.builtin.setup:
+        gather_subset:
+          - hardware
+          - network
+
+    - name: Collect BIOS information
+      ansible.builtin.shell: |
+        dmidecode -t bios | grep -E "(Vendor|Version|Release Date)" || echo "dmidecode not available"
+      register: bios_info_raw
+      failed_when: false
+      become: true
+      changed_when: false
+
+    - name: Parse BIOS information
+      ansible.builtin.set_fact:
+        bios_info:
+          vendor: "{{ (bios_info_raw.stdout_lines | select('match', '.*Vendor:.*') | first | regex_replace('.*Vendor:\\s*(.*)$', '\\1')) if bios_info_raw.stdout_lines is defined and (bios_info_raw.stdout_lines | select('match', '.*Vendor:.*') | list | length > 0) else 'Unknown' }}"
+          version: "{{ (bios_info_raw.stdout_lines | select('match', '.*Version:.*') | first | regex_replace('.*Version:\\s*(.*)$', '\\1')) if bios_info_raw.stdout_lines is defined and (bios_info_raw.stdout_lines | select('match', '.*Version:.*') | list | length > 0) else 'Unknown' }}"
+          release_date: "{{ (bios_info_raw.stdout_lines | select('match', '.*Release Date:.*') | first | regex_replace('.*Release Date:\\s*(.*)$', '\\1')) if bios_info_raw.stdout_lines is defined and (bios_info_raw.stdout_lines | select('match', '.*Release Date:.*') | list | length > 0) else 'Unknown' }}"
+      ignore_errors: true
+
+    - name: Collect network adapter information via BMC
+      block:
+        - name: Attempt to collect network info from target host
+          ansible.builtin.shell: |
+            for dev in $(ls /sys/class/net/ | grep -v lo); do
+              if [ -d "/sys/class/net/$dev/device" ]; then
+                vendor=$(cat /sys/class/net/$dev/device/vendor 2>/dev/null || echo "Unknown")
+                device=$(cat /sys/class/net/$dev/device/device 2>/dev/null || echo "Unknown")
+                driver=$(readlink /sys/class/net/$dev/device/driver 2>/dev/null | sed 's/.*\///' || echo "Unknown")
+                echo "$dev:$vendor:$device:$driver"
+              fi
+            done
+          register: network_adapters_raw
+          failed_when: false
+          become: true
+          changed_when: false
+          
+        - name: Fallback to BMC-based network collection when direct access fails
+          ansible.builtin.set_fact:
+            network_adapters_raw:
+              stdout_lines: []
+              failed: true
+          when: network_adapters_raw is not defined or network_adapters_raw.rc is not defined
+
+      rescue:
+        - name: Handle network collection failure gracefully
+          ansible.builtin.set_fact:
+            network_adapters_raw:
+              stdout_lines: []
+              failed: true
+          
+        - name: Log network collection method
+          ansible.builtin.debug:
+            msg: "Network adapter collection failed for {{ inventory_hostname }} - using BMC data if available"
+
+    - name: Parse network adapter information
+      ansible.builtin.set_fact:
+        network_adapters: "{{ network_adapters | default([]) + [{'name': item.split(':')[0], 'vendor_id': item.split(':')[1], 'device_id': item.split(':')[2], 'driver': item.split(':')[3]}] }}"
+      loop: "{{ network_adapters_raw.stdout_lines }}"
+      when: network_adapters_raw.stdout_lines is defined
+
+    - name: Collect storage controller information
+      ansible.builtin.shell: |
+        lspci | grep -i "raid\|storage" || echo "No RAID controllers found"
+      register: storage_controllers_raw
+      failed_when: false
+      become: true
+      changed_when: false
+
+    - name: Parse storage controller information
+      ansible.builtin.set_fact:
+        storage_controllers: "{{ storage_controllers_raw.stdout_lines | map('regex_replace', '^([^:]+): (.+)$', '\\1:\\2') | list }}"
+      when: storage_controllers_raw.stdout_lines is defined
+
+    # Prepare host data for firmware manager
+    - name: Prepare host data for firmware analysis
+      ansible.builtin.set_fact:
+        host_firmware_data:
+          hostname: "{{ inventory_hostname }}"
+          bmc_address: "{{ bmc_address | default('unknown') }}"
+          bmc_username: "{{ bmc_username | default('unknown') }}"
+          bmc_password: "{{ bmc_password | default('unknown') }}"
+          bmc_type: "{{ bmc_type | default('unknown') }}"
+          bmc_info: "{{ bmc_info | default({}) }}"
+          bios_info: "{{ bios_info | default({}) }}"
+          network_adapters: "{{ network_adapters | default([]) }}"
+          storage_controllers: "{{ storage_controllers | default([]) }}"
+          ansible_facts:
+            manufacturer: "{{ ansible_system_vendor | default('Unknown') }}"
+            product_name: "{{ ansible_product_name | default('Unknown') }}"
+            serial_number: "{{ ansible_product_serial | default('Unknown') }}"
+
+    # Run firmware analysis using the Python module
+    - name: Create temporary inventory file for firmware analysis
+      ansible.builtin.copy:
+        content: "{{ {'hosts': {inventory_hostname: host_firmware_data}} | to_json }}"
+        dest: "{{ firmware_output_dir }}/{{ inventory_hostname }}_temp_inventory.json"
+        mode: "0644"
+      delegate_to: localhost
+
+    - name: Run firmware inventory and analysis
+      ansible.builtin.script:
+        cmd: >
+          {{ playbook_dir }}/../library/firmware_manager.py 
+          --baseline {{ firmware_baseline_file if firmware_baseline_file is file else '/dev/null' }}
+          --inventory {{ firmware_output_dir }}/{{ inventory_hostname }}_temp_inventory.json
+          --output {{ firmware_output_dir }}/{{ inventory_hostname }}_firmware_analysis.json
+          {{ '--update-required-only' if update_required_only else '' }}
+          {{ '--dry-run' if not perform_updates else '' }}
+      register: firmware_analysis
+      delegate_to: localhost
+      failed_when: firmware_analysis.rc != 0
+
+    - name: Clean up temporary inventory file
+      ansible.builtin.file:
+        path: "{{ firmware_output_dir }}/{{ inventory_hostname }}_temp_inventory.json"
+        state: absent
+      delegate_to: localhost
+
+    - name: Load firmware analysis results
+      block:
+        - name: Check if firmware analysis file exists
+          ansible.builtin.stat:
+            path: "{{ firmware_output_dir }}/{{ inventory_hostname }}_firmware_analysis.json"
+          register: firmware_file_check
+          delegate_to: localhost
+
+        - name: Load firmware analysis results from file
+          ansible.builtin.include_vars:
+            file: "{{ firmware_output_dir }}/{{ inventory_hostname }}_firmware_analysis.json"
+            name: firmware_analysis_results
+          delegate_to: localhost
+          when: firmware_file_check.stat.exists
+
+        - name: Create default firmware analysis results when file doesn't exist
+          ansible.builtin.set_fact:
+            firmware_analysis_results:
+              host_results:
+                "{{ inventory_hostname }}":
+                  components: []
+                  analysis_status: "skipped"
+                  reason: "Check mode or script execution failed"
+          when: not firmware_file_check.stat.exists
+
+      rescue:
+        - name: Handle firmware analysis file loading errors
+          ansible.builtin.set_fact:
+            firmware_analysis_results:
+              host_results:
+                "{{ inventory_hostname }}":
+                  components: []
+                  analysis_status: "error"
+                  reason: "File loading failed: {{ ansible_failed_result.msg | default('Unknown error') }}"
+
+    # Analyze results and create summary
+    - name: Analyze firmware compliance
+      ansible.builtin.set_fact:
+        firmware_compliance:
+          total_components: "{{ firmware_analysis_results.host_results[inventory_hostname].components | default([]) | length }}"
+          updates_available: "{{ firmware_analysis_results.host_results[inventory_hostname].components | default([]) |
+            selectattr('update_available', 'equalto', true) | list | length }}"
+          updates_required: "{{ firmware_analysis_results.host_results[inventory_hostname].components | default([]) |
+            selectattr('update_required', 'equalto', true) | list | length }}"
+          critical_updates: "{{ firmware_analysis_results.host_results[inventory_hostname].components | default([]) |
+            selectattr('update_required', 'equalto', true) | selectattr('component_type', 'in', ['BMC', 'BIOS']) | list | length }}"
+          compliance_status: "{{ 'COMPLIANT' if (firmware_analysis_results.host_results[inventory_hostname].components | default([]) |
+            selectattr('update_required', 'equalto', true) | list | length) == 0 else 'NON_COMPLIANT' }}"
+          analysis_status: "{{ firmware_analysis_results.host_results[inventory_hostname].analysis_status | default('completed') }}"
+
+    - name: Display firmware analysis summary
+      ansible.builtin.debug:
+        msg: |
+          Firmware Analysis Summary for {{ inventory_hostname }}:
+          - Total Components: {{ firmware_compliance.total_components }}
+          - Updates Available: {{ firmware_compliance.updates_available }}
+          - Updates Required: {{ firmware_compliance.updates_required }}
+          - Critical Updates: {{ firmware_compliance.critical_updates }}
+          - Compliance Status: {{ firmware_compliance.compliance_status }}
+
+    - name: Log critical firmware issues
+      ansible.builtin.debug:
+        msg: "CRITICAL: {{ inventory_hostname }} has {{ firmware_compliance.critical_updates }} critical firmware updates required!"
+      when: firmware_compliance.critical_updates | int > 0
+
+# Summary and reporting phase
+- name: Generate firmware validation summary
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [firmware, all]
+  vars:
+    firmware_baseline_file: "{{ playbook_dir }}/../config/firmware_baselines.yaml"
+    firmware_output_dir: "{{ playbook_dir }}/../reports/firmware"
+  tasks:
+    - name: Register validation end
+      ansible.builtin.set_fact:
+        firmware_validation_end: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+
+    - name: Collect all firmware results
+      ansible.builtin.set_fact:
+        all_firmware_results: "{{ groups['baremetal'] | map('extract', hostvars, 'firmware_compliance') | select('defined') | list }}"
+
+    - name: Calculate overall firmware statistics
+      ansible.builtin.set_fact:
+        firmware_summary:
+          total_hosts: "{{ groups['baremetal'] | length }}"
+          analyzed_hosts: "{{ all_firmware_results | length }}"
+          compliant_hosts: "{{ all_firmware_results | selectattr('compliance_status', 'equalto', 'COMPLIANT') | list | length }}"
+          non_compliant_hosts: "{{ all_firmware_results | selectattr('compliance_status', 'equalto', 'NON_COMPLIANT') | list | length }}"
+          total_components: "{{ all_firmware_results | map(attribute='total_components') | map('int') | sum }}"
+          total_updates_required: "{{ all_firmware_results | map(attribute='updates_required') | map('int') | sum }}"
+          total_critical_updates: "{{ all_firmware_results | map(attribute='critical_updates') | map('int') | sum }}"
+          compliance_rate: "{{ ((all_firmware_results | selectattr('compliance_status', 'equalto', 'COMPLIANT') | list | length) / (all_firmware_results | length) * 100) | round(1) if all_firmware_results | length > 0 else 0.0 }}"
+
+    - name: Display overall firmware summary
+      ansible.builtin.debug:
+        msg: |
+          =================================
+          FIRMWARE VALIDATION SUMMARY
+          =================================
+          Total Hosts: {{ firmware_summary.total_hosts }}
+          Analyzed Hosts: {{ firmware_summary.analyzed_hosts }}
+          Compliant Hosts: {{ firmware_summary.compliant_hosts }}
+          Non-Compliant Hosts: {{ firmware_summary.non_compliant_hosts }}
+          Compliance Rate: {{ firmware_summary.compliance_rate }}%
+          Total Components Analyzed: {{ firmware_summary.total_components }}
+          Total Updates Required: {{ firmware_summary.total_updates_required }}
+          Critical Updates Required: {{ firmware_summary.total_critical_updates }}
+          =================================
+
+    - name: Generate firmware validation report
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/templates/firmware_report.html.j2"
+        dest: "{{ firmware_output_dir }}/firmware_validation_report.html"
+        mode: "0644"
+      vars:
+        report_timestamp: "{{ firmware_validation_end }}"
+        start_time: "{{ firmware_validation_start }}"
+        end_time: "{{ firmware_validation_end }}"
+      when: 
+        - firmware_baseline_file is file
+        - (playbook_dir + "/templates/firmware_report.html.j2") is file
+      ignore_errors: true
+
+    - name: Store firmware validation results for main report
+      ansible.builtin.set_fact:
+        validation_results: >-
+          {{ validation_results | default({}) | combine({
+            'firmware': {
+
+              'end_time': firmware_validation_end,
+              'summary': firmware_summary,
+              'passed': firmware_summary.compliance_rate | float == 100.0,
+              'total_checks': firmware_summary.total_hosts,
+              'passed_checks': firmware_summary.compliant_hosts,
+              'failed_checks': firmware_summary.non_compliant_hosts,
+              'critical_issues': firmware_summary.total_critical_updates
+            }
+          }) }}
+      delegate_to: localhost
+      run_once: true

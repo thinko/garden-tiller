@@ -117,8 +117,8 @@
       ansible.builtin.set_fact:
         validation_results: "{{ validation_results | default({}) | combine({'dns': dns_validation}) }}"
         total_checks: "{{ total_checks | default(0) | int + 4 }}" # 4 major DNS checks
-        passed_checks: "{{ passed_checks | default(0) | int + passed_dns_checks }}"
-        failed_checks: "{{ failed_checks | default(0) | int + failed_dns_checks }}"
+        passed_checks: "{{ passed_checks | default(0) | int + (passed_dns_checks | int) }}"
+        failed_checks: "{{ failed_checks | default(0) | int + (failed_dns_checks | int) }}"
       vars:
         passed_dns_checks: >-
           {{
@@ -127,7 +127,7 @@
             (1 if dns_validation.openshift_records.passed|default(false) else 0) +
             (1 if dns_validation.reverse_dns.passed|default(false) else 0)
           }}
-        failed_dns_checks: "{{ 4 - passed_dns_checks }}"
+        failed_dns_checks: "{{ 4 - (passed_dns_checks | int) }}"
       delegate_to: localhost
       run_once: true
 

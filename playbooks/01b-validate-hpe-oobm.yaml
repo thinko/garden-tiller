@@ -56,35 +56,81 @@
     # Collect HPE iLO information using our Python module with robust error handling
     - name: Collect detailed iLO information
       block:
-        - name: Run iLO info collection script with stderr filtering
+        - name: Debug HPE hosts before script execution
+          ansible.builtin.debug:
+            msg: "About to execute script for hosts: {{ hpe_hosts }}"
+
+        - name: Run iLO info collection script with Redfish API (enhanced reliability)
           ansible.builtin.shell: >
             python3 {{ playbook_dir }}/../library/ilo_utils.py  {{ hostvars[item].bmc_address }}
             {{ hostvars[item].bmc_username }}
             {{ hostvars[item].bmc_password }}
-            --ribcl 2>/dev/null || echo '{"error": "collection_failed", "details": "See stderr for details"}'
+            get_all_details
+            --redfish
           args:
             executable: /bin/bash
           register: ilo_info_results
           loop: "{{ hpe_hosts }}"
           ignore_errors: true
 
-        - name: Process iLO info results using Python helper
-          ansible.builtin.shell: >
-            python3 {{ playbook_dir }}/../library/process_ilo_results.py 
-            '{{ ilo_info_results.results | to_json }}'
-            '{{ hostvars | to_json }}'
-          register: processed_ilo_results
-          failed_when: false
+        - name: Debug script results
+          ansible.builtin.debug:
+            msg:
+              - "Script execution results:"
+              - "Total results: {{ ilo_info_results.results | length }}"
+              - "Results: {{ ilo_info_results.results }}"
 
-        - name: Parse processed iLO results
+        - name: Process iLO info results directly
           ansible.builtin.set_fact:
-            hpe_oobm_results: "{{ processed_ilo_results.stdout | from_json }}"
-          when: processed_ilo_results.rc == 0
+            hpe_oobm_results: >-
+              {%- set results_dict = {} -%}
+              {%- for result in ilo_info_results.results -%}
+                {%- set host_name = hpe_hosts[loop.index0] -%}
+                {%- set parsed_result = result.stdout | from_json if result.rc == 0 and result.stdout | length > 0 else {} -%}
+                {%- set _ = results_dict.update({
+                  host_name: {
+                    'connection_status': 'success' if result.rc == 0 and 'error' not in parsed_result else 'failed',
+                    'server_details': {
+                      'product_name': parsed_result.get('product_name', 'Unknown'),
+                      'host_uuid': parsed_result.get('host_uuid', 'Unknown'),
+                      'power_status': parsed_result.get('power_status', 'Unknown'),
+                      'firmware_version': parsed_result.get('firmware_version', 'Unknown')
+                    },
+                    'health_status': parsed_result.get('health_status', {
+                      'system_health': 'Unknown',
+                      'processor': 'Unknown', 
+                      'memory': 'Unknown',
+                      'storage': 'Unknown'
+                    }),
+                    'boot_settings': parsed_result.get('boot_settings', {
+                      'one_time_boot': 'Unknown',
+                      'persistent_boot': 'Unknown'
+                    }),
+                    'network_adapters': parsed_result.get('network_adapters', []),
+                    'network_summary': {
+                      'adapter_count': parsed_result.get('network_adapter_count', 0),
+                      'adapters_with_mac': (parsed_result.get('network_adapters', []) | selectattr('mac_address', 'defined') | list | length)
+                    },
+                    'collection_timestamp': ansible_date_time.iso8601,
+                    'bmc_address': hostvars[host_name].bmc_address | default('Unknown'),
+                    'bmc_type': hostvars[host_name].bmc_type | default('ilo'),
+                    'hostname': host_name,
+                    'error_details': {
+                      'message': parsed_result.get('error', 'No errors') if result.rc == 0 else 'Command execution failed',
+                      'exit_code': result.rc,
+                      'stdout_preview': result.stdout[:200] + '...' if result.stdout | length > 200 else result.stdout,
+                      'stderr_preview': result.stderr[:200] + '...' if result.stderr | length > 200 else result.stderr,
+                      'parsed_error': 'json_parse_error' if result.rc == 0 and result.stdout | length > 0 and 'error' in parsed_result else 'none'
+                    }
+                  }
+                }) -%}
+              {%- endfor -%}
+              {{ results_dict }}
 
-        - name: Handle processing failure
-          ansible.builtin.set_fact:
-            hpe_oobm_results: {}
-          when: processed_ilo_results.rc != 0
+        - name: Debug processed results
+          ansible.builtin.debug:
+            var: hpe_oobm_results
+          when: ansible_verbosity >= 2
       rescue:
         - name: Handle complete iLO collection failure
           ansible.builtin.set_fact:

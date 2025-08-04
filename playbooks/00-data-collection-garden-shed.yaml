@@ -1,0 +1,326 @@
+---
+# Garden-Tiller: Centralized Data Collection using Garden Shed
+# This playbook collects comprehensive hardware data from all systems using garden_shed
+# and makes it available to subsequent playbooks, eliminating redundant data collection
+
+- name: Centralized Hardware Data Collection with Garden Shed
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  tags: [data-collection, garden-shed, all]
+  vars:
+    structlog_level: info
+    garden_shed_wrapper: "{{ playbook_dir }}/../scripts/garden_shed_wrapper.py"
+    # Timeout and retry settings for data collection
+    collection_timeout: 60
+    max_retries: 2
+    verify_ssl: false
+  tasks:
+    - name: Register data collection start
+      ansible.builtin.set_fact:
+        data_collection_start: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      run_once: true
+
+    - name: Initialize centralized data store
+      ansible.builtin.set_fact:
+        garden_shed_data: {}
+        data_collection_summary: {
+          'total_hosts': 0,
+          'successful_collections': 0,
+          'failed_collections': 0,
+          'collection_errors': []
+        }
+      run_once: true
+
+    - name: Verify garden_shed wrapper script exists
+      ansible.builtin.stat:
+        path: "{{ garden_shed_wrapper }}"
+      register: wrapper_stat
+      run_once: true
+
+    - name: Fail if garden_shed wrapper script is missing
+      ansible.builtin.fail:
+        msg: "Garden Shed wrapper script not found at {{ garden_shed_wrapper }}"
+      when: not wrapper_stat.stat.exists
+      run_once: true
+
+    - name: Display data collection plan
+      ansible.builtin.debug:
+        msg:
+          - "Starting centralized data collection using Garden Shed"
+          - "Target hosts: {{ groups['baremetal'] | length }}"
+          - "Collection timeout: {{ collection_timeout }}s"
+          - "Max retries: {{ max_retries }}"
+      run_once: true
+
+    # Collect data from all baremetal hosts using garden_shed
+    - name: Collect comprehensive hardware data using Garden Shed
+      block:
+        - name: Run Garden Shed data collection for each host
+          ansible.builtin.shell: >
+            python3 {{ garden_shed_wrapper }}
+            {{ hostvars[item].bmc_address }}
+            {{ hostvars[item].bmc_username }}
+            {{ hostvars[item].bmc_password }}
+            --timeout {{ collection_timeout }}
+            {{ '--verify-ssl' if verify_ssl else '' }}
+          args:
+            executable: /bin/bash
+          register: garden_shed_results
+          loop: "{{ groups['baremetal'] }}"
+          ignore_errors: true
+          retries: "{{ max_retries }}"
+          delay: 5
+
+        - name: Process Garden Shed collection results
+          ansible.builtin.set_fact:
+            garden_shed_data: >-
+              {%- set processed_data = {} -%}
+              {%- set summary = {
+                'total_hosts': groups['baremetal'] | length,
+                'successful_collections': 0,
+                'failed_collections': 0,
+                'collection_errors': []
+              } -%}
+              {%- for result in garden_shed_results.results -%}
+                {%- set host_name = groups['baremetal'][loop.index0] -%}
+                {%- if result.rc == 0 and result.stdout | length > 0 -%}
+                  {%- set parsed_result = result.stdout | from_json -%}
+                  {%- if parsed_result.collection_status == 'success' -%}
+                    {%- set _ = summary.update({'successful_collections': summary.successful_collections + 1}) -%}
+                    {%- set _ = processed_data.update({
+                      host_name: {
+                        'collection_status': 'success',
+                        'timestamp': parsed_result.timestamp,
+                        'bmc_address': hostvars[host_name].bmc_address,
+                        'bmc_type': hostvars[host_name].bmc_type | default('unknown'),
+                        'system_info': parsed_result.garden_shed_data.system_info,
+                        'raw_data': parsed_result.garden_shed_data
+                      }
+                    }) -%}
+                  {%- else -%}
+                    {%- set _ = summary.update({'failed_collections': summary.failed_collections + 1}) -%}
+                    {%- set _ = summary.collection_errors.append({
+                      'host': host_name,
+                      'error': parsed_result.error | default('Unknown error'),
+                      'bmc_address': hostvars[host_name].bmc_address
+                    }) -%}
+                    {%- set _ = processed_data.update({
+                      host_name: {
+                        'collection_status': 'failed',
+                        'error': parsed_result.error | default('Unknown error'),
+                        'bmc_address': hostvars[host_name].bmc_address,
+                        'bmc_type': hostvars[host_name].bmc_type | default('unknown')
+                      }
+                    }) -%}
+                  {%- endif -%}
+                {%- else -%}
+                  {%- set _ = summary.update({'failed_collections': summary.failed_collections + 1}) -%}
+                  {%- set _ = summary.collection_errors.append({
+                    'host': host_name,
+                    'error': 'Command execution failed: ' + (result.stderr | default('Unknown error')),
+                    'bmc_address': hostvars[host_name].bmc_address,
+                    'exit_code': result.rc
+                  }) -%}
+                  {%- set _ = processed_data.update({
+                    host_name: {
+                      'collection_status': 'failed',
+                      'error': 'Command execution failed: ' + (result.stderr | default('Unknown error')),
+                      'exit_code': result.rc,
+                      'bmc_address': hostvars[host_name].bmc_address,
+                      'bmc_type': hostvars[host_name].bmc_type | default('unknown')
+                    }
+                  }) -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {{ processed_data }}
+            data_collection_summary: >-
+              {%- set summary = {
+                'total_hosts': groups['baremetal'] | length,
+                'successful_collections': 0,
+                'failed_collections': 0,
+                'collection_errors': []
+              } -%}
+              {%- for result in garden_shed_results.results -%}
+                {%- set host_name = groups['baremetal'][loop.index0] -%}
+                {%- if result.rc == 0 and result.stdout | length > 0 -%}
+                  {%- set parsed_result = result.stdout | from_json -%}
+                  {%- if parsed_result.collection_status == 'success' -%}
+                    {%- set _ = summary.update({'successful_collections': summary.successful_collections + 1}) -%}
+                  {%- else -%}
+                    {%- set _ = summary.update({'failed_collections': summary.failed_collections + 1}) -%}
+                    {%- set _ = summary.collection_errors.append({
+                      'host': host_name,
+                      'error': parsed_result.error | default('Unknown error'),
+                      'bmc_address': hostvars[host_name].bmc_address
+                    }) -%}
+                  {%- endif -%}
+                {%- else -%}
+                  {%- set _ = summary.update({'failed_collections': summary.failed_collections + 1}) -%}
+                  {%- set _ = summary.collection_errors.append({
+                    'host': host_name,
+                    'error': 'Command execution failed: ' + (result.stderr | default('Unknown error')),
+                    'bmc_address': hostvars[host_name].bmc_address,
+                    'exit_code': result.rc
+                  }) -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {{ summary }}
+
+      rescue:
+        - name: Handle complete data collection failure
+          ansible.builtin.set_fact:
+            data_collection_summary: {
+              'total_hosts': "{{ groups['baremetal'] | length }}",
+              'successful_collections': 0,
+              'failed_collections': "{{ groups['baremetal'] | length }}",
+              'collection_errors': [{'error': 'Complete collection failure in rescue block'}]
+            }
+
+        - name: Log complete data collection failure
+          ansible.builtin.debug:
+            msg: "Complete failure in Garden Shed data collection - no data available"
+
+    - name: Display data collection summary
+      ansible.builtin.debug:
+        msg:
+          - "Data Collection Summary:"
+          - "Total hosts: {{ data_collection_summary.total_hosts }}"
+          - "Successful collections: {{ data_collection_summary.successful_collections }}"
+          - "Failed collections: {{ data_collection_summary.failed_collections }}"
+          - "Success rate: {{ ((data_collection_summary.successful_collections | int / data_collection_summary.total_hosts | int) * 100) | round(1) }}%"
+          - "Errors: {{ data_collection_summary.collection_errors | length }}"
+      run_once: true
+
+    - name: Display collection errors if any
+      ansible.builtin.debug:
+        msg: "Collection errors: {{ data_collection_summary.collection_errors }}"
+      when: data_collection_summary.collection_errors | length > 0
+      run_once: true
+
+    # Extract and prepare commonly used data views for other playbooks
+    - name: Create MAC address lookup table
+      ansible.builtin.set_fact:
+        mac_address_data: >-
+          {%- set mac_data = {} -%}
+          {%- for host_name, host_data in garden_shed_data.items() -%}
+            {%- if host_data.collection_status == 'success' and 'system_info' in host_data -%}
+              {%- set system_info = host_data.system_info -%}
+              {%- set network_adapters = system_info.get('NetworkAdapters', []) -%}
+              {%- set host_macs = [] -%}
+              {%- for adapter in network_adapters -%}
+                {%- set physical_ports = adapter.get('PhysicalPorts', []) -%}
+                {%- for port in physical_ports -%}
+                  {%- if port.get('MacAddress') -%}
+                    {%- set _ = host_macs.append({
+                      'mac_address': port.MacAddress,
+                      'adapter_name': adapter.get('Name', 'Unknown'),
+                      'port_name': port.get('Name', 'Unknown'),
+                      'status': port.get('Status', {}),
+                      'ipv4_addresses': port.get('IPv4Addresses', []),
+                      'ipv6_addresses': port.get('IPv6Addresses', [])
+                    }) -%}
+                  {%- endif -%}
+                {%- endfor -%}
+              {%- endfor -%}
+              {%- set _ = mac_data.update({host_name: host_macs}) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ mac_data }}
+      run_once: true
+
+    - name: Create firmware inventory lookup table
+      ansible.builtin.set_fact:
+        firmware_data: >-
+          {%- set firmware_data = {} -%}
+          {%- for host_name, host_data in garden_shed_data.items() -%}
+            {%- if host_data.collection_status == 'success' and 'system_info' in host_data -%}
+              {%- set system_info = host_data.system_info -%}
+              {%- set firmware_inventory = system_info.get('FirmwareInventory', {}) -%}
+              {%- set _ = firmware_data.update({
+                host_name: {
+                  'bios_version': system_info.get('BiosVersion', 'Unknown'),
+                  'firmware_inventory': firmware_inventory,
+                  'system_bmc': firmware_inventory.get('SystemBMC', []),
+                  'system_rom_active': firmware_inventory.get('SystemRomActive', []),
+                  'system_rom_backup': firmware_inventory.get('SystemRomBackup', []),
+                  'other_firmware': firmware_inventory.get('Other', [])
+                }
+              }) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ firmware_data }}
+      run_once: true
+
+    - name: Create system hardware summary
+      ansible.builtin.set_fact:
+        hardware_summary: >-
+          {%- set hardware_data = {} -%}
+          {%- for host_name, host_data in garden_shed_data.items() -%}
+            {%- if host_data.collection_status == 'success' and 'system_info' in host_data -%}
+              {%- set system_info = host_data.system_info -%}
+              {%- set processor_info = system_info.get('Processor', {}) -%}
+              {%- set memory_info = system_info.get('Memory', {}) -%}
+              {%- set _ = hardware_data.update({
+                host_name: {
+                  'manufacturer': system_info.get('Manufacturer', 'Unknown'),
+                  'model': system_info.get('Model', 'Unknown'),
+                  'serial_number': system_info.get('SerialNumber', 'Unknown'),
+                  'uuid': system_info.get('UUID', 'Unknown'),
+                  'hostname': system_info.get('HostName', 'Unknown'),
+                  'power_state': system_info.get('PowerState', 'Unknown'),
+                  'post_state': system_info.get('PostState', 'Unknown'),
+                  'system_type': system_info.get('SystemType', 'Unknown'),
+                  'processor': {
+                    'count': processor_info.get('count', 0),
+                    'model': processor_info.get('model', 'Unknown'),
+                    'manufacturer': processor_info.get('Manufacturer', 'Unknown'),
+                    'total_cores': processor_info.get('TotalCores', 0),
+                    'total_threads': processor_info.get('TotalThreads', 0),
+                    'max_speed_mhz': processor_info.get('MaxSpeedMHz', 0)
+                  },
+                  'memory': {
+                    'total_gb': memory_info.get('TotalSystemMemoryGB', 0),
+                    'module_count': memory_info.get('MemoryModules', []) | length,
+                    'modules': memory_info.get('MemoryModules', [])
+                  },
+                  'network_adapter_count': system_info.get('NetworkAdapters', []) | length
+                }
+              }) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ hardware_data }}
+      run_once: true
+
+    - name: Register data collection completion
+      ansible.builtin.set_fact:
+        data_collection_end: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      run_once: true
+
+    - name: Store centralized data collection results
+      ansible.builtin.set_fact:
+        validation_results: >-
+          {{ (validation_results | default({}) if validation_results is mapping else {}) | combine({
+            'garden_shed_data_collection': {
+              'start_time': data_collection_start,
+              'end_time': data_collection_end,
+              'summary': data_collection_summary,
+              'raw_data': garden_shed_data,
+              'mac_addresses': mac_address_data,
+              'firmware_inventory': firmware_data,
+              'hardware_summary': hardware_summary
+            }
+          }) }}
+      run_once: true
+
+    - name: Log successful data collection completion
+      ansible.builtin.debug:
+        msg:
+          - "Garden Shed data collection completed successfully"
+          - "Data is now available in the following variables:"
+          - "  - garden_shed_data: Raw system data from each host"
+          - "  - mac_address_data: Extracted MAC address information"
+          - "  - firmware_data: Firmware inventory by host"
+          - "  - hardware_summary: System hardware summary by host"
+          - "Subsequent playbooks can now use this centralized data"
+      run_once: true

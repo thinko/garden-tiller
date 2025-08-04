@@ -84,7 +84,7 @@
         - name: Log firmware file loading errors
           ansible.builtin.debug:
             msg: "Some firmware analysis files could not be loaded or parsed - continuing with available data. Error: {{ ansible_failed_result }}"
-      run_once: true
+          run_once: true
     # Note: The global total_checks, passed_checks, failed_checks, warning_checks
     # are already accumulated by individual playbooks. No need to recalculate here
     # unless the logic in those playbooks is insufficient.
@@ -108,83 +108,6 @@
         state: directory
         mode: "0755"
 
-    - name: Consolidate server data from all validation results
-      ansible.builtin.set_fact:
-        validation_results: >-
-          {% set all_servers = {} %}
-          {% set current_results = validation_results | default({}) %}
-          
-          <!-- Process HPE iLO results -->
-          {% if current_results.hpe_oobm is defined and current_results.hpe_oobm.results is defined %}
-            {% for hostname, host_data in current_results.hpe_oobm.results.items() %}
-              {% set server_entry = {
-                'connection_status': host_data.connection_status | default('unknown'),
-                'server_details': host_data.server_details | default({}),
-                'health_status': host_data.health_status | default({}),
-                'boot_settings': host_data.boot_settings | default({}),
-                'network_adapters': host_data.network_adapters | default([]),
-                'bmc_address': host_data.bmc_address | default('Unknown'),
-                'bmc_type': host_data.bmc_type | default('ilo'),
-                'collection_timestamp': host_data.collection_timestamp | default('Unknown'),
-                'power_validation': host_data.power_validation | default({}),
-                'firmware_validation': host_data.firmware_validation | default({}),
-                'health_validation': host_data.health_validation | default({}),
-                'boot_validation': host_data.boot_validation | default({}),
-                'network_validation': host_data.network_validation | default({}),
-                'raw_data': host_data.raw_data | default({}),
-                'error_details': host_data.error_details | default({}) if host_data.connection_status == 'failed' else {}
-              } %}
-              {% set all_servers = all_servers | combine({hostname: server_entry}) %}
-            {% endfor %}
-          {% endif %}
-          
-          <!-- Process Dell iDRAC results -->
-          {% if current_results.dell_oobm is defined and current_results.dell_oobm.results is defined %}
-            {% for hostname, host_data in current_results.dell_oobm.results.items() %}
-              {% set existing_server = all_servers.get(hostname, {}) %}
-              {% set server_entry = existing_server | combine({
-                'connection_status': host_data.connection_status | default(existing_server.connection_status | default('unknown')),
-                'server_details': existing_server.server_details | default({}) | combine(host_data.server_details | default({})),
-                'bmc_address': host_data.bmc_address | default(existing_server.bmc_address | default('Unknown')),
-                'bmc_type': host_data.bmc_type | default('idrac'),
-                'collection_timestamp': host_data.collection_timestamp | default(existing_server.collection_timestamp | default('Unknown')),
-                'dell_data': host_data,
-                'raw_data': existing_server.raw_data | default({}) | combine(host_data.raw_data | default({})),
-                'error_details': host_data.error_details | default({}) if host_data.connection_status == 'failed' else existing_server.error_details | default({})
-              }) %}
-              {% set all_servers = all_servers | combine({hostname: server_entry}) %}
-            {% endfor %}
-          {% endif %}
-          
-          <!-- Process MAC address validation results -->
-          {% if current_results.mac_validation is defined and current_results.mac_validation.results is defined %}
-            {% for hostname, mac_data in current_results.mac_validation.results.items() %}
-              {% set existing_server = all_servers.get(hostname, {}) %}
-              {% set server_entry = existing_server | combine({
-                'network_interfaces': mac_data.interfaces | default({}),
-                'interface_count': mac_data.interface_count | default(0),
-                'valid_mac_count': mac_data.valid_mac_count | default(0),
-                'invalid_mac_count': mac_data.invalid_mac_count | default(0),
-                'mac_validation_status': mac_data.validation_status | default('unknown'),
-                'mac_data_source': mac_data.data_source | default('unknown')
-              }) %}
-              {% set all_servers = all_servers | combine({hostname: server_entry}) %}
-            {% endfor %}
-          {% endif %}
-          
-          <!-- Process IPMI results -->
-          {% if current_results.ipmi is defined and current_results.ipmi.results is defined %}
-            {% for hostname, ipmi_data in current_results.ipmi.results.items() %}
-              {% set existing_server = all_servers.get(hostname, {}) %}
-              {% set server_entry = existing_server | combine({
-                'ipmi_data': ipmi_data
-              }) %}
-              {% set all_servers = all_servers | combine({hostname: server_entry}) %}
-            {% endfor %}
-          {% endif %}
-          
-          {{ current_results | combine({'all_servers': all_servers}) }}
-      run_once: true
 
     - name: Generate comprehensive main validation report
       ansible.builtin.template:
@@ -192,10 +115,8 @@
         dest: "{{ report_file }}"
         mode: "0644"
       vars:
-        # Pass all necessary data to the template
         report_title: "Garden-Tiller Lab Validation Report"
         generation_timestamp: "{{ report_start }}"
-        lab_environment: "{{ lab_environment | default('Garden-Tiller Production Lab') }}"
       run_once: true
 
     - name: Generate specialized network configuration report
@@ -205,7 +126,6 @@
         mode: "0644"
       vars:
         generation_timestamp: "{{ report_start }}"
-        lab_environment: "{{ lab_environment | default('Garden-Tiller Production Lab') }}"
       run_once: true
       when: validation_results.network is defined
 
@@ -216,7 +136,6 @@
         mode: "0644"
       vars:
         generation_timestamp: "{{ report_start }}"
-        lab_environment: "{{ lab_environment | default('Garden-Tiller Production Lab') }}"
       run_once: true
       when: validation_results.firmware is defined
 

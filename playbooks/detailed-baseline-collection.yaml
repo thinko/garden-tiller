@@ -60,7 +60,7 @@
             python3 {{ playbook_dir }}/../library/ilo_utils.py {{ hostvars[item].bmc_address }}
             {{ hostvars[item].bmc_username }}
             {{ hostvars[item].bmc_password }}
-            --ribcl 2>/dev/null || echo '{"error": "collection_failed"}'
+            --use-ribcl 2>/dev/null || echo '{"error": "collection_failed"}'
           register: ilo_info_results
           loop: "{{ hpe_hosts }}"
           ignore_errors: true

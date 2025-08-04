@@ -1,0 +1,429 @@
+---
+# Garden-Tiller: IPMI Enumeration Playbook with Enhanced Cipher Error Filtering
+# Enumerates hardware details via IPMI for OpenShift compatibility verification
+# Uses wrapper script for consistent filtering of benign "Unable to Get Channel Cipher Suites" errors
+
+- name: Enumerate hardware details via IPMI with enhanced error handling
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [ipmi, all]
+  vars:
+    structlog_level: info
+    resilient_policy:
+      retry_count: 3
+      retry_delay: 2
+      circuit_threshold: 5
+    # Use the wrapper script for cleaner output
+    ipmi_wrapper_script: "{{ playbook_dir }}/../scripts/ipmi_wrapper.sh"
+  tasks:
+    - name: Register validation start
+      ansible.builtin.set_fact:
+        ipmi_enum_start: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      run_once: true
+
+    - name: Verify IPMI wrapper script exists
+      ansible.builtin.stat:
+        path: "{{ ipmi_wrapper_script }}"
+      register: wrapper_stat
+      run_once: true
+
+    - name: Fail if IPMI wrapper script is missing
+      ansible.builtin.fail:
+        msg: "IPMI wrapper script not found at {{ ipmi_wrapper_script }}"
+      when: not wrapper_stat.stat.exists
+      run_once: true
+
+    - name: Set up result dictionary for IPMI enumeration
+      ansible.builtin.set_fact:
+        ipmi_results: {}
+      run_once: true
+
+    - name: Configure Structlog logger for IPMI enumeration
+      ansible.builtin.debug:
+        msg: "Configuring Structlog logger for IPMI enumeration at level: {{ structlog_level }}"
+      run_once: true
+
+    # Enumerate FRU (Field Replaceable Unit) information with cipher error filtering
+    - name: Collect FRU information (cipher-error filtered)
+      ansible.builtin.shell: >
+        {{ ipmi_wrapper_script }} 
+        {{ hostvars[item]['bmc_address'] }}
+        {{ hostvars[item]['bmc_username'] }}
+        {{ hostvars[item]['bmc_password'] }}
+        "fru print"
+        "FRU_COLLECTION_FAILED"
+      loop: "{{ groups['baremetal'] }}"
+      register: fru_results
+      failed_when: false  # Let the wrapper handle error filtering
+
+    - name: Debug FRU collection results
+      ansible.builtin.debug:
+        msg:
+          - "Node: {{ item.item }}"
+          - "Return code: {{ item.rc }}"
+          - "Stdout length: {{ item.stdout | length }}"
+          - "Stderr (should be clean): {{ item.stderr | default('') }}"
+          - "Command successful: {{ item.rc == 0 }}"
+          - "Has valid FRU data: {{ 'Board Mfg' in item.stdout }}"
+      loop: "{{ fru_results.results }}"
+      when: ansible_verbosity >= 2
+
+    # For Dell servers, enhance FRU information with iDRAC Redfish data
+    - name: Check for Dell servers and enhance with iDRAC data
+      ignore_errors: true
+      when: groups['baremetal'] | map('extract', hostvars) | selectattr('bmc_type', 'equalto', 'idrac') | list | length > 0
+      block:
+        - name: Get Dell hosts that weren't already processed in Dell playbook
+          ansible.builtin.set_fact:
+            dell_hosts_to_process: "{{ groups['baremetal'] | map('extract', hostvars) | selectattr('bmc_type', 'equalto', 'idrac') | map(attribute='inventory_hostname') | list }}"
+          run_once: true
+
+        - name: Collect additional Dell iDRAC information using Redfish
+          ansible.builtin.shell: >
+            python3 {{ playbook_dir }}/../library/idrac_utils.py  
+            {{ hostvars[item]['bmc_address'] }}  
+            {{ hostvars[item]['bmc_username'] }}  
+            {{ hostvars[item]['bmc_password'] }}
+          args:
+            executable: /bin/bash
+          register: dell_idrac_results
+          loop: "{{ dell_hosts_to_process }}"
+          ignore_errors: true
+          when: dell_hosts_to_process | length > 0
+
+        - name: Incorporate Dell iDRAC data into IPMI results for Dell servers
+          ansible.builtin.set_fact:
+            ipmi_results: >
+              {% set node_results = ipmi_results | default({}) if ipmi_results is mapping else {} %}
+              {% set node = item.item | string %}
+              {% set current = node_results[node] | default({}) if node in node_results and node_results[node] is mapping else {} %}
+              {% if not item.failed %}
+                {% set idrac_data = item.stdout | from_json %}
+                {% set updated = current | combine({
+                  'idrac_data': {
+                    'uptime': idrac_data.uptime | default({}),
+                    'network_devices': idrac_data.network_devices | default([]),
+                    'dns_settings': idrac_data.dns_settings | default({}),
+                    'ntp_settings': idrac_data.ntp_settings | default({})
+                  }
+                }) %}
+                {{ node_results | combine({node: updated}) }}
+              {% else %}
+                {{ node_results }}
+              {% endif %}
+          loop: "{{ dell_idrac_results.results | default([]) }}"
+          when: dell_hosts_to_process | length > 0
+
+    - name: Check for HPE servers and enhance with iLO data
+      ignore_errors: true
+      when: groups['baremetal'] | map('extract', hostvars) | selectattr('bmc_type', 'equalto', 'ilo') | list | length > 0
+      block:
+        - name: Get HPE hosts that weren't already processed in HPE playbook
+          ansible.builtin.set_fact:
+            hpe_hosts_to_process: "{{ groups['baremetal'] | map('extract', hostvars) | selectattr('bmc_type', 'equalto', 'ilo') | map(attribute='inventory_hostname') | list }}"
+          run_once: true
+
+        - name: Collect additional HPE iLO information using proliantutils
+          ansible.builtin.shell: >
+            python3 {{ playbook_dir }}/../library/ilo_utils.py  
+            {{ hostvars[item]['bmc_address'] }}  
+            {{ hostvars[item]['bmc_username'] }}  
+            {{ hostvars[item]['bmc_password'] }} --use-ribcl
+          args:
+            executable: /bin/bash
+          register: hpe_ilo_results
+          loop: "{{ hpe_hosts_to_process }}"
+          ignore_errors: true
+          when: hpe_hosts_to_process | length > 0
+
+        - name: Incorporate HPE iLO data into IPMI results for HPE servers
+          ansible.builtin.set_fact:
+            ipmi_results: >
+              {% set node_results = ipmi_results | default({}) if ipmi_results is mapping else {} %}
+              {% set node = item.item | string %}
+              {% set current = node_results[node] | default({}) if node in node_results and node_results[node] is mapping else {} %}
+              {% if not item.failed %}
+                {% set ilo_data = item.stdout | from_json %}
+                {% set updated = current | combine({
+                  'ilo_data': {
+                    'product_name': ilo_data.product_name | default('Unknown'),
+                    'firmware_version': ilo_data.firmware_version | default('Unknown'),
+                    'power_status': ilo_data.power_status | default('Unknown'),
+                    'health_status': ilo_data.health_status | default({}),
+                    'network_adapters': ilo_data.network_adapters | default([])
+                  }
+                }) %}
+                {{ node_results | combine({node: updated}) }}
+              {% else %}
+                {{ node_results }}
+              {% endif %}
+          loop: "{{ hpe_ilo_results.results | default([]) }}"
+          when: hpe_hosts_to_process | length > 0
+
+    - name: Extract system manufacturer and model
+      ansible.builtin.set_fact:
+        ipmi_results: >
+          {% set node_results = ipmi_results | default({}) if ipmi_results is mapping else {} %}
+          {% set node = item.item | string %}
+          {% set current = node_results[node] | default({}) if node in node_results and node_results[node] is mapping else {} %}
+          {% if item.stdout != "FRU_COLLECTION_FAILED" and "Board Mfg" in item.stdout %}
+            {% set manufacturer = item.stdout | regex_findall('Board Mfg\\s+:\\s+(.+?)$', multiline=True) | first | default('Unknown') %}
+            {% set model = item.stdout | regex_findall('Board Product\\s+:\\s+(.+?)$', multiline=True) | first | default('Unknown') %}
+            {% set serial = item.stdout | regex_findall('Product Serial\\s+:\\s+(.+?)$', multiline=True) | first | default('Unknown') %}
+            {% set updated = current | combine({'manufacturer': manufacturer, 'model': model, 'serial': serial, 'fru_check': true}) %}
+            {{ node_results | combine({node: updated}) }}
+          {% else %}
+            {% set updated = current | combine({'fru_check': false, 'error': 'Failed to retrieve FRU information'}) %}
+            {{ node_results | combine({node: updated}) }}
+          {% endif %}
+      loop: "{{ fru_results.results }}"
+
+    # Enumerate system hardware details with cipher error filtering
+    - name: Collect system hardware details (cipher-error filtered)
+      ansible.builtin.shell: >
+        {{ ipmi_wrapper_script }}
+        {{ hostvars[item]['bmc_address'] }}
+        {{ hostvars[item]['bmc_username'] }}
+        {{ hostvars[item]['bmc_password'] }}
+        "sdr type 'Processor' 'Memory'"
+        "HW_COLLECTION_FAILED"
+      loop: "{{ groups['baremetal'] }}"
+      register: hw_results
+      failed_when: false
+
+    - name: Extract processor and memory status
+      ansible.builtin.set_fact:
+        ipmi_results: >
+          {% set node_results = ipmi_results | default({}) if ipmi_results is mapping else {} %}
+          {% set node = item.item | string %}
+          {% set current = node_results[node] | default({}) if node in node_results and node_results[node] is mapping else {} %}
+          {% if item.stdout != "HW_COLLECTION_FAILED" %}
+            {% set cpu_count = item.stdout | regex_findall('(CPU\\d+|Processor\\d+)', multiline=True) | list | length %}
+            {% set dimm_count = item.stdout | regex_findall('(DIMM\\s\\w+|Memory\\s\\w+)', multiline=True) | list | length %}
+            {% set updated = current | combine({'cpu_count': cpu_count, 'dimm_count': dimm_count, 'hardware_check': true}) %}
+            {{ node_results | combine({node: updated}) }}
+          {% else %}
+            {% set updated = current | combine({'hardware_check': false, 'error': current.error | default('') + ' Failed to retrieve hardware information'}) %}
+            {{ node_results | combine({node: updated}) }}
+          {% endif %}
+      loop: "{{ hw_results.results }}"
+
+    # Check IPMI sensors with cipher error filtering
+    - name: Collect sensor data (cipher-error filtered)
+      ansible.builtin.shell: >
+        {{ ipmi_wrapper_script }}
+        {{ hostvars[item]['bmc_address'] }}
+        {{ hostvars[item]['bmc_username'] }}
+        {{ hostvars[item]['bmc_password'] }}
+        "sensor list"
+        "SENSOR_COLLECTION_FAILED"
+      loop: "{{ groups['baremetal'] }}"
+      register: sensor_results
+      failed_when: false
+
+    - name: Analyze sensor data for critical issues
+      ansible.builtin.set_fact:
+        ipmi_results: >
+          {% set node_results = ipmi_results | default({}) if ipmi_results is mapping else {} %}
+          {% set node = item.item | string %}
+          {% set current = node_results[node] | default({}) if node in node_results and node_results[node] is mapping else {} %}
+          {% if item.stdout != "SENSOR_COLLECTION_FAILED" %}
+            {% set critical_sensors = item.stdout | regex_findall('(.*?\\|.*?\\|.*?cr.*?)', multiline=True) | list %}
+            {% set warnings = item.stdout | regex_findall('(.*?\\|.*?\\|.*?nc.*?)', multiline=True) | list %}
+            {% set sensor_status = critical_sensors | length == 0 %}
+            {% set updated = current | combine({
+              'sensor_check': true,
+              'sensor_status': sensor_status,
+              'critical_sensors': critical_sensors | length,
+              'warning_sensors': warnings | length
+            }) %}
+            {{ node_results | combine({node: updated}) }}
+          {% else %}
+            {% set updated = current | combine({'sensor_check': false, 'error': current.error | default('') + ' Failed to retrieve sensor information'}) %}
+            {{ node_results | combine({node: updated}) }}
+          {% endif %}
+      loop: "{{ sensor_results.results }}"
+
+    # Check system power status with cipher error filtering
+    - name: Collect power status (cipher-error filtered)
+      ansible.builtin.shell: >
+        {{ ipmi_wrapper_script }}
+        {{ hostvars[item]['bmc_address'] }}
+        {{ hostvars[item]['bmc_username'] }}
+        {{ hostvars[item]['bmc_password'] }}
+        "chassis status"
+        "CHASSIS_STATUS_FAILED"
+      loop: "{{ groups['baremetal'] }}"
+      register: power_results
+      failed_when: false
+
+    - name: Analyze power status
+      ansible.builtin.set_fact:
+        ipmi_results: >
+          {% set node_results = ipmi_results | default({}) if ipmi_results is mapping else {} %}
+          {% set node = item.item | string %}
+          {% set current = node_results[node] | default({}) if node in node_results and node_results[node] is mapping else {} %}
+          {% if item.stdout != "CHASSIS_STATUS_FAILED" %}
+            {% set power_state = item.stdout | regex_findall('System Power\\s+:\\s+(\\w+)', multiline=True) | first | default('Unknown') %}
+            {% set power_on = power_state == 'on' %}
+            {% set updated = current | combine({'power_check': true, 'power_state': power_state, 'power_on': power_on}) %}
+            {{ node_results | combine({node: updated}) }}
+          {% else %}
+            {% set updated = current | combine({'power_check': false, 'error': current.error | default('') + ' Failed to retrieve power status'}) %}
+            {{ node_results | combine({node: updated}) }}
+          {% endif %}
+      loop: "{{ power_results.results }}"
+
+    # Get system boot parameters and boot order with cipher error filtering
+    - name: Check boot parameters (cipher-error filtered)
+      ansible.builtin.shell: >
+        {{ ipmi_wrapper_script }}
+        {{ hostvars[item]['bmc_address'] }}
+        {{ hostvars[item]['bmc_username'] }}
+        {{ hostvars[item]['bmc_password'] }}
+        "chassis bootparam get 5"
+        "BOOT_PARAM_FAILED"
+      loop: "{{ groups['baremetal'] }}"
+      register: boot_results
+      failed_when: false
+
+    - name: Analyze boot parameters
+      ansible.builtin.set_fact:
+        ipmi_results: >
+          {% set node_results = ipmi_results | default({}) if ipmi_results is mapping else {} %}
+          {% set node = item.item | string %}
+          {% set current = node_results[node] | default({}) if node in node_results and node_results[node] is mapping else {} %}
+          {% if item.stdout != "BOOT_PARAM_FAILED" %}
+            {% set boot_device = item.stdout | regex_findall('Boot Device Selector\\s+:\\s+(.+?)$', multiline=True) | first | default('Unknown') %}
+            {% set updated = current | combine({'boot_check': true, 'boot_device': boot_device}) %}
+            {{ node_results | combine({node: updated}) }}
+          {% else %}
+            {% set updated = current | combine({'boot_check': false, 'error': current.error | default('') + ' Failed to retrieve boot parameters'}) %}
+            {{ node_results | combine({node: updated}) }}
+          {% endif %}
+      loop: "{{ boot_results.results }}"
+
+    # Check SEL (System Event Log) for critical errors with cipher error filtering
+    - name: Check System Event Log (cipher-error filtered)
+      ansible.builtin.shell: >
+        {{ ipmi_wrapper_script }}
+        {{ hostvars[item]['bmc_address'] }}
+        {{ hostvars[item]['bmc_username'] }}
+        {{ hostvars[item]['bmc_password'] }}
+        "sel list last 10"
+        "SEL_COLLECTION_FAILED"
+      loop: "{{ groups['baremetal'] }}"
+      register: sel_results
+      failed_when: false
+
+    - name: Analyze System Event Log
+      ansible.builtin.set_fact:
+        ipmi_results: >
+          {% set node_results = ipmi_results | default({}) if ipmi_results is mapping else {} %}
+          {% set node = item.item | string %}
+          {% set current = node_results[node] | default({}) if node in node_results and node_results[node] is mapping else {} %}
+          {% if item.stdout != "SEL_COLLECTION_FAILED" %}
+            {% set critical_events = item.stdout | regex_findall('(Critical|Error|Fatal)', multiline=True) | list | length %}
+            {% set warning_events = item.stdout | regex_findall('(Warning|Non-critical)', multiline=True) | list | length %}
+            {% set sel_status = critical_events == 0 %}
+            {% set updated = current | combine({
+              'sel_check': true,
+              'sel_status': sel_status,
+              'critical_events': critical_events,
+              'warning_events': warning_events
+            }) %}
+            {{ node_results | combine({node: updated}) }}
+          {% else %}
+            {% set updated = current | combine({'sel_check': false, 'error': current.error | default('') + ' Failed to retrieve SEL information'}) %}
+            {{ node_results | combine({node: updated}) }}
+          {% endif %}
+      loop: "{{ sel_results.results }}"
+
+    # Summary and validation results
+    - name: Ensure ipmi_results is dictionary before check counters
+      ansible.builtin.set_fact:
+        ipmi_results: "{{ ipmi_results if ipmi_results is mapping else {} }}"
+      run_once: true
+
+    # Update check counters for final report
+    - name: Calculate IPMI check statistics
+      ansible.builtin.set_fact:
+        ipmi_fru_passed: >-
+          {{ (ipmi_results | dict2items | 
+              selectattr('value.fru_check', 'defined') | 
+              selectattr('value.fru_check') | list | length) 
+             if ipmi_results is mapping else 0 }}
+        ipmi_hardware_passed: >-
+          {{ (ipmi_results | dict2items | 
+              selectattr('value.hardware_check', 'defined') | 
+              selectattr('value.hardware_check') | list | length) 
+             if ipmi_results is mapping else 0 }}
+        ipmi_sensor_passed: >-
+          {{ (ipmi_results | dict2items | 
+              selectattr('value.sensor_check', 'defined') | 
+              selectattr('value.sensor_check') | list | length) 
+             if ipmi_results is mapping else 0 }}
+        ipmi_power_passed: >-
+          {{ (ipmi_results | dict2items | 
+              selectattr('value.power_check', 'defined') | 
+              selectattr('value.power_check') | list | length) 
+             if ipmi_results is mapping else 0 }}
+        ipmi_sel_passed: >-
+          {{ (ipmi_results | dict2items | 
+              selectattr('value.sel_check', 'defined') | 
+              selectattr('value.sel_check') | list | length) 
+             if ipmi_results is mapping else 0 }}
+        ipmi_warning_sensors: >-
+          {{ (ipmi_results | dict2items | 
+              selectattr('value.warning_sensors', 'defined') | 
+              map(attribute='value.warning_sensors') | sum) 
+             if ipmi_results is mapping else 0 }}
+        ipmi_warning_events: >-
+          {{ (ipmi_results | dict2items | 
+              selectattr('value.warning_events', 'defined') | 
+              map(attribute='value.warning_events') | sum) 
+             if ipmi_results is mapping else 0 }}
+      run_once: true
+
+    - name: Update check counters
+      ansible.builtin.set_fact:
+        total_checks: "{{ (total_checks | default(0) | int) + (groups['baremetal'] | length * 5) }}"
+        passed_checks: >-
+          {{ (passed_checks | default(0) | int) +
+             ipmi_fru_passed | int +
+             ipmi_hardware_passed | int +
+             ipmi_sensor_passed | int +
+             ipmi_power_passed | int +
+             ipmi_sel_passed | int
+          }}
+        failed_checks: >-
+          {{ (failed_checks | default(0) | int) + ((groups['baremetal'] | length * 5) -
+             ipmi_fru_passed | int -
+             ipmi_hardware_passed | int -
+             ipmi_sensor_passed | int -
+             ipmi_power_passed | int -
+             ipmi_sel_passed | int)
+          }}
+        warning_checks: >-
+          {{ (warning_checks | default(0) | int) +
+             ipmi_warning_sensors | int +
+             ipmi_warning_events | int
+          }}
+      delegate_to: localhost
+      run_once: true
+
+    - name: Display IPMI enumeration summary
+      ansible.builtin.debug:
+        msg:
+          - "=== IPMI Hardware Enumeration Summary ==="
+          - "Nodes processed: {{ groups['baremetal'] | length }}"
+          - "FRU checks passed: {{ ipmi_fru_passed }}"
+          - "Hardware checks passed: {{ ipmi_hardware_passed }}"
+          - "Sensor checks passed: {{ ipmi_sensor_passed }}"
+          - "Power checks passed: {{ ipmi_power_passed }}"
+          - "SEL checks passed: {{ ipmi_sel_passed }}"
+          - "Warning sensors: {{ ipmi_warning_sensors }}"
+          - "Warning events: {{ ipmi_warning_events }}"
+          - "Cipher errors filtered: All benign 'Unable to Get Channel Cipher Suites' errors ignored"
+      run_once: true

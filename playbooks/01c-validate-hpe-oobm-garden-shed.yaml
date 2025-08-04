@@ -1,0 +1,347 @@
+---
+# Garden-Tiller: Enhanced HPE iLO Out-of-Band Management Validation Playbook
+# Uses the garden_shed library for direct Redfish API access
+
+- name: Verify HPE iLO configuration and details using Garden Shed
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  tags: [oobm, hpe, ilo, garden-shed, all]
+  vars:
+    verify_ssl: false # Default to not verify SSL certificates for legacy iLOs
+    timeout: 30 # Timeout for API requests
+  tasks:
+    - name: Register validation start
+      ansible.builtin.set_fact:
+        hpe_oobm_validation_start: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      run_once: true
+
+    - name: Set up result dictionary for HPE iLO validation
+      ansible.builtin.set_fact:
+        hpe_oobm_results: {}
+      run_once: true
+
+    # Identify HPE iLO systems
+    - name: Get HPE iLO hosts
+      ansible.builtin.set_fact:
+        hpe_hosts: "{{ groups['baremetal'] | map('extract', hostvars) | selectattr('bmc_type', 'equalto', 'ilo') | map(attribute='inventory_hostname') | list }}"
+      run_once: true
+
+    - name: Skip playbook if no HPE iLO hosts found
+      ansible.builtin.meta: end_play
+      when: hpe_hosts | length == 0
+      run_once: true
+
+    - name: Display HPE hosts count
+      ansible.builtin.debug:
+        msg: "Found {{ hpe_hosts | length }} HPE iLO host(s) to validate using Garden Shed"
+      run_once: true
+
+    # Use centralized garden_shed data from 00-data-collection-garden-shed.yaml
+    - name: Verify garden_shed data is available
+      ansible.builtin.fail:
+        msg: "Garden Shed data not available. Run data collection playbook first."
+      when: garden_shed_data is not defined
+      run_once: true
+
+    - name: Process centralized garden_shed data for HPE iLO hosts
+      block:
+        - name: Process centralized garden_shed data for HPE iLO hosts
+          ansible.builtin.set_fact:
+            hpe_oobm_results: >-
+              {%- set results_dict = {} -%}
+              {%- for host_name in hpe_hosts -%}
+                {%- if host_name in garden_shed_data and garden_shed_data[host_name].collection_status == 'success' -%}
+                  {%- set garden_data = garden_shed_data[host_name].system_info -%}
+                  {%- set _ = results_dict.update({
+                    host_name: {
+                      'collection_status': 'success',
+                      'collection_timestamp': garden_shed_data[host_name].timestamp,
+                      'bmc_address': hostvars[host_name].bmc_address | default('Unknown'),
+                      'bmc_type': hostvars[host_name].bmc_type | default('ilo'),
+                      'hostname': host_name,
+                      'system_details': {
+                        'manufacturer': garden_data.get('Manufacturer', 'Unknown'),
+                        'model': garden_data.get('Model', 'Unknown'),
+                        'serial_number': garden_data.get('SerialNumber', 'Unknown'),
+                        'uuid': garden_data.get('UUID', 'Unknown'),
+                        'bios_version': garden_data.get('BiosVersion', 'Unknown'),
+                        'hostname': garden_data.get('HostName', 'Unknown'),
+                        'power_state': garden_data.get('PowerState', 'Unknown'),
+                        'post_state': garden_data.get('PostState', 'Unknown'),
+                        'system_type': garden_data.get('SystemType', 'Unknown')
+                      },
+                      'processor_details': {
+                        'count': garden_data.get('ProcessorSummary', {}).get('Count', 0),
+                        'model': garden_data.get('ProcessorSummary', {}).get('Model', 'Unknown'),
+                        'manufacturer': garden_data.get('ProcessorSummary', {}).get('Manufacturer', 'Unknown'),
+                        'instruction_set': garden_data.get('ProcessorSummary', {}).get('InstructionSet', 'Unknown'),
+                        'total_cores': garden_data.get('ProcessorSummary', {}).get('TotalCores', 0),
+                        'total_threads': garden_data.get('ProcessorSummary', {}).get('TotalThreads', 0)
+                      },
+                      'memory_details': {
+                        'total_memory_gb': garden_data.get('MemorySummary', {}).get('TotalSystemMemoryGiB', 0),
+                        'module_count': (garden_data.get('Memory', {}).get('MemoryModules', []) | length),
+                        'modules': garden_data.get('Memory', {}).get('MemoryModules', [])
+                      },
+                      'firmware_details': {
+                        'ilo_version': garden_data.get('Oem', {}).get('Hpe', {}).get('iLOSelfTestResults', {}).get('VersionString', 'Unknown'),
+                        'bios_version': garden_data.get('BiosVersion', 'Unknown'),
+                        'firmware_inventory': garden_data.get('FirmwareInventory', {})
+                      },
+                      'network_details': {
+                        'adapter_count': (garden_data.get('NetworkAdapters', []) | length),
+                        'total_ports': (garden_data.get('NetworkAdapters', []) | map(attribute='PhysicalPorts') | map('length') | sum) if garden_data.get('NetworkAdapters') else 0,
+                        'adapters': garden_data.get('NetworkAdapters', [])
+                      },
+                      'error_details': {
+                        'errors': [],
+                        'warnings': []
+                      }
+                    }
+                  }) -%}
+                {%- else -%}
+                  {%- set _ = results_dict.update({
+                    host_name: {
+                      'collection_status': 'failed',
+                      'collection_timestamp': ansible_date_time.iso8601,
+                      'bmc_address': hostvars[host_name].bmc_address | default('Unknown'),
+                      'bmc_type': hostvars[host_name].bmc_type | default('ilo'),
+                      'hostname': host_name,
+                      'system_details': {
+                        'manufacturer': 'Collection Error',
+                        'model': 'Collection Error',
+                        'serial_number': 'Collection Error',
+                        'uuid': 'Collection Error',
+                        'bios_version': 'Collection Error',
+                        'hostname': 'Collection Error',
+                        'power_state': 'Collection Error',
+                        'post_state': 'Collection Error',
+                        'system_type': 'Collection Error'
+                      },
+                      'processor_details': {
+                        'count': 0,
+                        'model': 'Collection Error',
+                        'manufacturer': 'Collection Error',
+                        'instruction_set': 'Collection Error',
+                        'total_cores': 0,
+                        'total_threads': 0
+                      },
+                      'memory_details': {
+                        'total_memory_gb': 0,
+                        'module_count': 0,
+                        'modules': []
+                      },
+                      'firmware_details': {
+                        'ilo_version': 'Collection Error',
+                        'bios_version': 'Collection Error',
+                        'firmware_inventory': {}
+                      },
+                      'network_details': {
+                        'adapter_count': 0,
+                        'total_ports': 0,
+                        'adapters': []
+                      },
+                      'error_details': {
+                        'errors': ['No garden_shed data available'],
+                        'warnings': []
+                      }
+                    }
+                  }) -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {{ results_dict }}
+
+        - name: Debug processed garden_shed results from centralized data
+          ansible.builtin.debug:
+            var: hpe_oobm_results
+          when: ansible_verbosity >= 2
+      when: garden_shed_data is defined
+
+    # Enhanced validation using garden_shed data
+    - name: Validate system power status
+      ansible.builtin.set_fact:
+        hpe_oobm_results: "{{ hpe_oobm_results | combine({
+            item: (hpe_oobm_results[item] | default({}) | combine({
+              'power_validation': {
+                'status': 'pass' if (hpe_oobm_results[item] | default({})).get('system_details', {}).get('power_state', 'Unknown') in ['On', 'Off'] else 'warn',
+                'value': (hpe_oobm_results[item] | default({})).get('system_details', {}).get('power_state', 'Unknown'),
+                'post_state': (hpe_oobm_results[item] | default({})).get('system_details', {}).get('post_state', 'Unknown'),
+                'message': 'Power state available' if (hpe_oobm_results[item] | default({})).get('system_details', {}).get('power_state', 'Unknown') in ['On', 'Off'] else 'Power state unknown or invalid',
+                'expected': 'On or Off',
+                'validation_timestamp': ansible_date_time.iso8601
+              }
+            }))
+          }) }}"
+      loop: "{{ hpe_hosts }}"
+      when: item in hpe_oobm_results
+
+    - name: Validate processor information
+      ansible.builtin.set_fact:
+        hpe_oobm_results: "{{ hpe_oobm_results | combine({
+            item: (hpe_oobm_results[item] | default({}) | combine({
+              'processor_validation': {
+                'status': 'pass' if ((hpe_oobm_results[item] | default({})).get('processor_details', {}).get('count', 0) > 0 and (hpe_oobm_results[item] | default({})).get('processor_details', {}).get('total_cores', 0) > 0) else 'warn',
+                'processor_count': (hpe_oobm_results[item] | default({})).get('processor_details', {}).get('count', 0),
+                'total_cores': (hpe_oobm_results[item] | default({})).get('processor_details', {}).get('total_cores', 0),
+                'total_threads': (hpe_oobm_results[item] | default({})).get('processor_details', {}).get('total_threads', 0),
+                'model': (hpe_oobm_results[item] | default({})).get('processor_details', {}).get('model', 'Unknown'),
+                'message': 'Processor information available' if ((hpe_oobm_results[item] | default({})).get('processor_details', {}).get('count', 0) > 0) else 'Processor information unavailable',
+                'validation_timestamp': ansible_date_time.iso8601
+              }
+            }))
+          }) }}"
+      loop: "{{ hpe_hosts }}"
+      when: item in hpe_oobm_results
+
+    - name: Validate memory information
+      ansible.builtin.set_fact:
+        hpe_oobm_results: "{{ hpe_oobm_results | combine({
+            item: (hpe_oobm_results[item] | default({}) | combine({
+              'memory_validation': {
+                'status': 'pass' if ((hpe_oobm_results[item] | default({})).get('memory_details', {}).get('total_memory_gb', 0) > 0) else 'warn',
+                'total_memory_gb': (hpe_oobm_results[item] | default({})).get('memory_details', {}).get('total_memory_gb', 0),
+                'module_count': (hpe_oobm_results[item] | default({})).get('memory_details', {}).get('module_count', 0),
+                'message': ((hpe_oobm_results[item] | default({})).get('memory_details', {}).get('total_memory_gb', 0) | string) + ' GB total memory detected' if ((hpe_oobm_results[item] | default({})).get('memory_details', {}).get('total_memory_gb', 0) > 0) else 'Memory information unavailable',
+                'validation_timestamp': ansible_date_time.iso8601
+              }
+            }))
+          }) }}"
+      loop: "{{ hpe_hosts }}"
+      when: item in hpe_oobm_results
+
+    - name: Validate firmware version
+      ansible.builtin.set_fact:
+        hpe_oobm_results: "{{ hpe_oobm_results | combine({
+            item: (hpe_oobm_results[item] | default({}) | combine({
+              'firmware_validation': {
+                'status': 'pass' if ((hpe_oobm_results[item] | default({})).get('firmware_details', {}).get('ilo_version', 'Unknown') != 'Unknown' and 'Unknown' not in (hpe_oobm_results[item] | default({})).get('firmware_details', {}).get('ilo_version', 'Unknown')) else 'warn',
+                'ilo_version': (hpe_oobm_results[item] | default({})).get('firmware_details', {}).get('ilo_version', 'Unknown'),
+                'bios_version': (hpe_oobm_results[item] | default({})).get('firmware_details', {}).get('bios_version', 'Unknown'),
+                'minimum_version': (hostvars[item].min_ilo_firmware | default('2.0')) if item in hostvars else '2.0',
+                'message': 'Firmware versions detected' if ((hpe_oobm_results[item] | default({})).get('firmware_details', {}).get('ilo_version', 'Unknown') != 'Unknown') else 'Firmware versions unavailable',
+                'validation_timestamp': ansible_date_time.iso8601
+              }
+            }))
+          }) }}"
+      loop: "{{ hpe_hosts }}"
+      when: item in hpe_oobm_results
+
+    - name: Validate network adapters
+      ansible.builtin.set_fact:
+        hpe_oobm_results: "{{ hpe_oobm_results | combine({
+            item: (hpe_oobm_results[item] | default({}) | combine({
+              'network_validation': {
+                'status': 'pass' if ((hpe_oobm_results[item] | default({})).get('network_details', {}).get('adapter_count', 0) > 0) else 'warn',
+                'adapter_count': (hpe_oobm_results[item] | default({})).get('network_details', {}).get('adapter_count', 0),
+                'total_ports': (hpe_oobm_results[item] | default({})).get('network_details', {}).get('total_ports', 0),
+                'adapters': (hpe_oobm_results[item] | default({})).get('network_details', {}).get('adapters', []),
+                'message': ((hpe_oobm_results[item] | default({})).get('network_details', {}).get('adapter_count', 0) | string) + ' network adapters found' if ((hpe_oobm_results[item] | default({})).get('network_details', {}).get('adapter_count', 0) > 0) else 'No network adapters detected',
+                'validation_timestamp': ansible_date_time.iso8601
+              }
+            }))
+          }) }}"
+      loop: "{{ hpe_hosts }}"
+      when: item in hpe_oobm_results
+
+    # Save validation results
+    - name: Register validation end
+      ansible.builtin.set_fact:
+        hpe_oobm_validation_end: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      run_once: true
+
+    - name: Calculate summary statistics
+      ansible.builtin.set_fact:
+        hpe_success_count: >-
+          {{ (hpe_oobm_results | dict2items |
+            selectattr('value.collection_status', 'defined') |
+            selectattr('value.collection_status', 'equalto', 'success') | list | length)
+          if hpe_oobm_results is mapping else 0 }}
+        hpe_power_passed: >-
+          {{ (hpe_oobm_results | dict2items |
+              selectattr('value.power_validation.status', 'defined') |
+              selectattr('value.power_validation.status', 'equalto', 'pass') | list | length)
+             if hpe_oobm_results is mapping else 0 }}
+        hpe_processor_passed: >-
+          {{ (hpe_oobm_results | dict2items |
+              selectattr('value.processor_validation.status', 'defined') |
+              selectattr('value.processor_validation.status', 'equalto', 'pass') | list | length)
+             if hpe_oobm_results is mapping else 0 }}
+        hpe_memory_passed: >-
+          {{ (hpe_oobm_results | dict2items |
+              selectattr('value.memory_validation.status', 'defined') |
+              selectattr('value.memory_validation.status', 'equalto', 'pass') | list | length)
+             if hpe_oobm_results is mapping else 0 }}
+        hpe_firmware_passed: >-
+          {{ (hpe_oobm_results | dict2items |
+              selectattr('value.firmware_validation.status', 'defined') |
+              selectattr('value.firmware_validation.status', 'equalto', 'pass') | list | length)
+             if hpe_oobm_results is mapping else 0 }}
+        hpe_network_passed: >-
+          {{ (hpe_oobm_results | dict2items |
+              selectattr('value.network_validation.status', 'defined') |
+              selectattr('value.network_validation.status', 'equalto', 'pass') | list | length)
+             if hpe_oobm_results is mapping else 0 }}
+      delegate_to: localhost
+      run_once: true
+
+    - name: Store HPE iLO validation results with garden_shed data
+      ansible.builtin.set_fact:
+        validation_results: >-
+          {{ (validation_results | default({}) if validation_results is mapping else {}) | combine({
+            'hpe_oobm_garden_shed': {
+              'start_time': hpe_oobm_validation_start,
+              'end_time': hpe_oobm_validation_end,
+              'library_used': 'garden_shed',
+              'results': hpe_oobm_results,
+              'summary': {
+                'total': hpe_hosts | length,
+                'collection_success': hpe_success_count | int,
+                'power_passed': hpe_power_passed | int,
+                'processor_passed': hpe_processor_passed | int,
+                'memory_passed': hpe_memory_passed | int,
+                'firmware_passed': hpe_firmware_passed | int,
+                'network_passed': hpe_network_passed | int
+              }
+            }
+          }) }}
+      delegate_to: localhost
+      run_once: true
+
+    # Update check counters for final report  
+    - name: Update check counters
+      ansible.builtin.set_fact:
+        total_checks: "{{ total_checks | default(0) | int + (hpe_hosts | length * 5) }}"
+        passed_checks: >-
+          {{ passed_checks | default(0) | int +
+             hpe_power_passed | int +
+             hpe_processor_passed | int +
+             hpe_memory_passed | int +
+             hpe_firmware_passed | int +
+             hpe_network_passed | int
+          }}
+        failed_checks: >-
+          {{ failed_checks | default(0) | int + ((hpe_hosts | length * 5) -
+             hpe_power_passed | int -
+             hpe_processor_passed | int -
+             hpe_memory_passed | int -
+             hpe_firmware_passed | int -
+             hpe_network_passed | int)
+          }}
+      delegate_to: localhost
+      run_once: true
+
+    # Enhanced reporting
+    - name: Display garden_shed HPE iLO validation summary
+      ansible.builtin.debug:
+        msg:
+          - "=== Garden Shed HPE iLO Validation Summary ==="
+          - "Total HPE servers: {{ hpe_hosts | length }}"
+          - "Successful collections: {{ hpe_success_count }}"
+          - "Power validations passed: {{ hpe_power_passed }}"
+          - "Processor validations passed: {{ hpe_processor_passed }}"
+          - "Memory validations passed: {{ hpe_memory_passed }}"
+          - "Firmware validations passed: {{ hpe_firmware_passed }}"
+          - "Network validations passed: {{ hpe_network_passed }}"
+          - "Collection method: garden_shed Redfish library"
+      run_once: true

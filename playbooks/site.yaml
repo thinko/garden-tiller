@@ -27,32 +27,37 @@
         failed_checks: 0
         warning_checks: 0
 
+- name: Centralized Data Collection using Garden Shed
+  import_playbook: 00-data-collection-garden-shed.yaml
+  tags: [data-collection, garden-shed, oobm, hpe, ilo, dell, idrac, ipmi, redfish, all]
+
 - name: Include OOBM validation playbook
   import_playbook: 01-validate-oobm.yaml
   tags: [oobm, all]
 
 - name: Include Dell iDRAC validation playbook
   import_playbook: 01a-validate-dell-oobm.yaml
-  tags: [oobm, dell, idrac, all]
+  tags: [oobm, dell, idrac, redfish, all]
 
 - name: Include HPE iLO validation playbook
-  import_playbook: 01b-validate-hpe-oobm.yaml
-  tags: [oobm, hpe, ilo, all]
+  import_playbook: 01c-validate-hpe-oobm-garden-shed.yaml
+  tags: [oobm, hpe, ilo, redfish, all]
+#  import_playbook: 01b-validate-hpe-oobm.yaml
 
-- name: Include IPMI validation playbook
-  import_playbook: 02-enumerate-ipmi.yaml
-  tags: [ipmi, all]
+- name: Include IPMI/Hardware enumeration playbook (Garden Shed)
+  import_playbook: 02-enumerate-ipmi-garden-shed.yaml
+  tags: [ipmi, hardware, all]
 
-- name: Include firmware update validation playbook
-  import_playbook: 03-firmware-update.yaml
+- name: Include firmware validation playbook (Garden Shed)
+  import_playbook: 03-firmware-update-garden-shed.yaml
   tags: [firmware, all]
 
 - name: Include MAC address validation playbook
   import_playbook: 04-mac-address-validation.yaml
-  tags: [mac, all]
+  tags: [network, all]
 
-- name: Include network validation playbook
-  import_playbook: 05-network-validation.yaml
+- name: Include network validation playbook (Garden Shed)
+  import_playbook: 05-network-validation-garden-shed.yaml
   tags: [network, all]
 
 - name: Include clean boot network validation playbook

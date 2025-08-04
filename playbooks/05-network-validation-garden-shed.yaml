@@ -1,0 +1,505 @@
+---
+# Garden-Tiller: Network Validation Playbook (Garden Shed Enhanced)
+# Comprehensive network configuration validation using centralized garden_shed data
+# Features:
+# - Uses garden_shed data for network adapter and MAC address information
+# - Advanced LACP testing with dedicated Python script integration
+# - Switch connectivity testing and network discovery
+# - Configurable test modes for different deployment scenarios
+
+- name: Comprehensive Network Validation with Garden Shed Data
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  tags: [network, lacp, all]
+  vars:
+    structlog_level: info
+    resilient_policy:
+      retry_count: 3
+      retry_delay: 5
+      circuit_threshold: 5
+    lacp_test_script: "{{ playbook_dir }}/../scripts/lacp_validation_test.py"
+    results_output_dir: "{{ playbook_dir }}/../reports"
+    clean_boot_mode: true
+    test_all_permutations: true
+    run_basic_tests: true      # Enable basic network validation on each host
+    run_advanced_lacp: true    # Enable advanced LACP testing
+  tasks:
+    - name: Register validation start
+      ansible.builtin.set_fact:
+        network_validation_start: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      run_once: true
+
+    - name: Verify garden_shed data is available
+      ansible.builtin.fail:
+        msg: "Garden Shed data not available. Run data collection playbook first."
+      when: garden_shed_data is not defined or mac_address_data is not defined
+      run_once: true
+
+    - name: Set up result dictionary for network validation
+      ansible.builtin.set_fact:
+        network_results: "{{ network_results | default({}) if network_results is mapping else {} }}"
+      run_once: true
+
+    - name: Configure Structlog logger for network validation
+      ansible.builtin.debug:
+        msg: "Configuring Structlog logger for network validation at level: {{ structlog_level }}"
+      run_once: true
+
+    - name: Check prerequisites
+      block:
+        - name: Verify we have baremetal hosts
+          ansible.builtin.fail:
+            msg: "No baremetal hosts found in inventory"
+          when: groups['baremetal'] | default([]) | length == 0
+
+        - name: Check if LACP test script exists
+          ansible.builtin.stat:
+            path: "{{ lacp_test_script }}"
+          register: script_stat
+
+        - name: Fail if LACP test script not found
+          ansible.builtin.fail:
+            msg: "LACP test script not found at {{ lacp_test_script }}"
+          when: not script_stat.stat.exists
+
+        - name: Ensure results output directory exists
+          ansible.builtin.file:
+            path: "{{ results_output_dir }}"
+            state: directory
+            mode: '0755'
+
+        - name: Check if running as root
+          ansible.builtin.command: id -u
+          register: user_id
+          changed_when: false
+
+        - name: Warn if not running as root
+          ansible.builtin.debug:
+            msg: "WARNING: LACP tests require root privileges. Some tests may fail."
+          when: user_id.stdout != "0"
+
+    # Network discovery using garden_shed data
+    - name: Analyze garden_shed network data
+      block:
+        - name: Extract network adapter information from garden_shed data
+          ansible.builtin.set_fact:
+            network_inventory: >-
+              {%- set network_data = {} -%}
+              {%- for host_name in groups['baremetal'] -%}
+                {%- if host_name in garden_shed_data and garden_shed_data[host_name].collection_status == 'success' -%}
+                  {%- set system_info = garden_shed_data[host_name].system_info -%}
+                  {%- set network_adapters = system_info.get('NetworkAdapters', []) -%}
+                  {%- set host_network_info = {
+                    'total_adapters': network_adapters | length,
+                    'adapters': [],
+                    'total_physical_ports': 0,
+                    'mac_addresses': [],
+                    'port_status': {'up': 0, 'down': 0, 'unknown': 0}
+                  } -%}
+                  {%- for adapter in network_adapters -%}
+                    {%- set physical_ports = adapter.get('PhysicalPorts', []) -%}
+                    {%- set _ = host_network_info.update({'total_physical_ports': host_network_info.total_physical_ports + (physical_ports | length)}) -%}
+                    {%- set adapter_info = {
+                      'id': adapter.get('Id', 'Unknown'),
+                      'name': adapter.get('Name', 'Unknown'),
+                      'part_number': adapter.get('PartNumber', 'Unknown'),
+                      'serial_number': adapter.get('SerialNumber', 'Unknown'),
+                      'firmware_version': adapter.get('Firmware', {}).get('Current', {}).get('VersionString', 'Unknown'),
+                      'status': adapter.get('Status', {}),
+                      'physical_ports': []
+                    } -%}
+                    {%- for port in physical_ports -%}
+                      {%- if port.get('MacAddress') -%}
+                        {%- set _ = host_network_info.mac_addresses.append(port.MacAddress) -%}
+                      {%- endif -%}
+                      {%- set port_state = port.get('Status', {}).get('State', 'Unknown') -%}
+                      {%- if port_state == 'Enabled' -%}
+                        {%- set _ = host_network_info.port_status.update({'up': host_network_info.port_status.up + 1}) -%}
+                      {%- elif port_state == 'Disabled' -%}
+                        {%- set _ = host_network_info.port_status.update({'down': host_network_info.port_status.down + 1}) -%}
+                      {%- else -%}
+                        {%- set _ = host_network_info.port_status.update({'unknown': host_network_info.port_status.unknown + 1}) -%}
+                      {%- endif -%}
+                      {%- set port_info = {
+                        'name': port.get('Name', 'Unknown'),
+                        'mac_address': port.get('MacAddress', 'Unknown'),
+                        'status': port.get('Status', {}),
+                        'ipv4_addresses': port.get('IPv4Addresses', []),
+                        'ipv6_addresses': port.get('IPv6Addresses', [])
+                      } -%}
+                      {%- set _ = adapter_info.physical_ports.append(port_info) -%}
+                    {%- endfor -%}
+                    {%- set _ = host_network_info.adapters.append(adapter_info) -%}
+                  {%- endfor -%}
+                  {%- set _ = network_data.update({host_name: host_network_info}) -%}
+                {%- else -%}
+                  {%- set _ = network_data.update({host_name: {'collection_status': 'failed', 'error': 'No garden_shed data available'}}) -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {{ network_data }}
+
+        - name: Display network adapter summary from garden_shed data
+          ansible.builtin.debug:
+            msg:
+              - "=== Network Adapter Summary from Garden Shed ==="
+              - "Host: {{ item.key }}"
+              - "Collection Status: {{ item.value.collection_status | default('success') }}"
+              - "Total Network Adapters: {{ item.value.total_adapters | default(0) }}"
+              - "Total Physical Ports: {{ item.value.total_physical_ports | default(0) }}"
+              - "MAC Addresses Found: {{ item.value.mac_addresses | default([]) | length }}"
+              - "Port Status - Up: {{ item.value.port_status.up | default(0) }}, Down: {{ item.value.port_status.down | default(0) }}, Unknown: {{ item.value.port_status.unknown | default(0) }}"
+          loop: "{{ network_inventory | dict2items }}"
+
+    # Advanced LACP validation tests for each baremetal host
+    - name: Run advanced LACP validation tests for baremetal hosts
+      when: run_advanced_lacp | default(true)
+      block:
+        - name: Run LACP validation test script
+          ansible.builtin.command:
+            cmd: >
+              python3 {{ lacp_test_script }}
+              --inventory {{ inventory_file }}
+              --output {{ results_output_dir }}/lacp_results_{{ item }}_{{ ansible_date_time.epoch }}.json
+              --verbose
+          args:
+            chdir: "{{ playbook_dir }}/.."
+          register: lacp_test_results
+          loop: "{{ groups['baremetal'] | default([]) }}"
+          delegate_to: "{{ item }}"
+          ignore_errors: true
+          when: 
+            - ansible_connection != 'local'
+            - groups['baremetal'] is defined
+            - groups['baremetal'] | length > 0
+
+        - name: Process LACP test results
+          ansible.builtin.set_fact:
+            network_results: >-
+              {{ network_results | combine({
+                  item.item: {
+                    'lacp_test_success': not item.failed,
+                    'lacp_test_output': item.stdout if not item.failed else '',
+                    'lacp_test_error': item.stderr if item.failed else '',
+                    'test_timestamp': ansible_date_time.iso8601
+                  }
+                })
+              }}
+          loop: "{{ lacp_test_results.results | default([]) }}"
+          when: 
+            - lacp_test_results is defined
+            - lacp_test_results.results is defined
+            - lacp_test_results is not skipped
+
+    # Alternative: Run tests locally if we can't delegate
+    - name: Run local LACP validation test (fallback)
+      when: ansible_connection == 'local' or network_results | length == 0
+      block:
+        - name: Run LACP validation test locally
+          ansible.builtin.command:
+            cmd: >
+              python3 {{ lacp_test_script }}
+              --inventory {{ ansible_inventory_sources[0] | default(playbook_dir + '/../inventories/hosts.yaml') }}
+              --output {{ results_output_dir }}/lacp_results_local_{{ ansible_date_time.epoch }}.json
+              --verbose
+          args:
+            chdir: "{{ playbook_dir }}/.."
+          register: local_lacp_test
+          ignore_errors: true
+
+        - name: Process local LACP test results
+          ansible.builtin.set_fact:
+            network_results: >-
+              {{ network_results | combine({
+                  'localhost': {
+                    'lacp_test_success': not (local_lacp_test.failed | default(true)),
+                    'lacp_test_output': local_lacp_test.stdout | default(''),
+                    'lacp_test_error': local_lacp_test.stderr | default(''),
+                    'test_timestamp': ansible_date_time.iso8601
+                  }
+                })
+              }}
+          when: local_lacp_test is defined
+
+    # Basic network connectivity tests using garden_shed data
+    - name: Basic network connectivity validation using garden_shed data
+      block:
+        - name: Test network connectivity between hosts using BMC addresses from garden_shed
+          ansible.builtin.shell: |
+            {% for host in groups['baremetal'] | default([]) %}
+            {% if host in garden_shed_data %}
+            bmc_addr="{{ garden_shed_data[host].bmc_address | default('') }}"
+            if [[ -n "$bmc_addr" ]]; then
+              echo "Testing connectivity to BMC $bmc_addr for host {{ host }}"
+              if ping -c 3 -W 5 "$bmc_addr" >/dev/null 2>&1; then
+                echo "  SUCCESS: BMC $bmc_addr is reachable"
+              else
+                echo "  FAILED: BMC $bmc_addr is not reachable"
+              fi
+            fi
+            {% endif %}
+            {% endfor %}
+          register: connectivity_test
+          changed_when: false
+
+        - name: Test switch connectivity (if switch info available in inventory)
+          ansible.builtin.shell: |
+            {% for host in groups['baremetal'] %}
+            {% if hostvars[host].get('switch_ip') %}
+            echo "Testing switch connectivity for {{ host }}: {{ hostvars[host]['switch_ip'] }}"
+            if ping -c 3 -W 5 "{{ hostvars[host]['switch_ip'] }}" >/dev/null 2>&1; then
+              echo "  SUCCESS: Switch {{ hostvars[host]['switch_ip'] }} is reachable"
+            else
+              echo "  FAILED: Switch {{ hostvars[host]['switch_ip'] }} is not reachable"
+            fi
+            {% endif %}
+            {% endfor %}
+          register: switch_connectivity_test
+          changed_when: false
+          ignore_errors: true
+
+    # Network validation using garden_shed data instead of direct collection
+    - name: Validate network configuration using garden_shed data
+      block:
+        - name: Analyze network adapter capabilities from garden_shed data
+          ansible.builtin.set_fact:
+            adapter_capabilities: >-
+              {%- set capabilities = {} -%}
+              {%- for host_name in groups['baremetal'] -%}
+                {%- if host_name in network_inventory and network_inventory[host_name].get('adapters') -%}
+                  {%- set host_caps = {
+                    'supports_bonding': false,
+                    'supports_vlan': false,
+                    'has_multiple_ports': false,
+                    'max_ports_per_adapter': 0,
+                    'total_mac_addresses': network_inventory[host_name].mac_addresses | length
+                  } -%}
+                  {%- for adapter in network_inventory[host_name].adapters -%}
+                    {%- set port_count = adapter.physical_ports | length -%}
+                    {%- if port_count > 1 -%}
+                      {%- set _ = host_caps.update({'supports_bonding': true, 'has_multiple_ports': true}) -%}
+                    {%- endif -%}
+                    {%- if port_count > host_caps.max_ports_per_adapter -%}
+                      {%- set _ = host_caps.update({'max_ports_per_adapter': port_count}) -%}
+                    {%- endif -%}
+                    {%- if adapter.name is search('.*[Vv][Ll][Aa][Nn].*') or 'vlan' in (adapter.name | lower) -%}
+                      {%- set _ = host_caps.update({'supports_vlan': true}) -%}
+                    {%- endif -%}
+                  {%- endfor -%}
+                  {%- set _ = capabilities.update({host_name: host_caps}) -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {{ capabilities }}
+
+        - name: Display network capabilities analysis
+          ansible.builtin.debug:
+            msg:
+              - "Network Capabilities Analysis for {{ item.key }}:"
+              - "  Supports Bonding: {{ item.value.supports_bonding }}"
+              - "  Supports VLAN: {{ item.value.supports_vlan }}"
+              - "  Has Multiple Ports: {{ item.value.has_multiple_ports }}"
+              - "  Max Ports per Adapter: {{ item.value.max_ports_per_adapter }}"
+              - "  Total MAC Addresses: {{ item.value.total_mac_addresses }}"
+          loop: "{{ adapter_capabilities | dict2items }}"
+
+    # Basic Network Validation (runs on baremetal hosts directly)
+    - name: Check bonding/LACP configuration on baremetal hosts
+      delegate_to: "{{ item }}"
+      ansible.builtin.shell: cat /proc/net/bonding/bond* 2>/dev/null || echo "No bonding interfaces found"
+      register: bonding_status
+      changed_when: false
+      failed_when: false
+      loop: "{{ groups['baremetal'] | default([]) }}"
+      when: 
+        - run_basic_tests | default(true)
+        - groups['baremetal'] is defined
+        - groups['baremetal'] | length > 0
+
+    - name: Analyze bonding mode for baremetal hosts
+      delegate_to: "{{ item.item }}"
+      ansible.builtin.set_fact:
+        "bond_mode_{{ item.item | regex_replace('[^a-zA-Z0-9]', '_') }}": "{{ item.stdout | regex_findall('Bonding Mode: (.+)$', multiline=True) | first | default('none') }}"
+      loop: "{{ bonding_status.results | default([]) }}"
+      when: 
+        - run_basic_tests | default(true)
+        - "'No bonding interfaces found' not in item.stdout"
+
+    - name: Check VLAN configuration on baremetal hosts
+      delegate_to: "{{ item }}"
+      ansible.builtin.shell: "ip -d link show | grep -i vlan || echo 'No VLANs found'"
+      register: vlan_status
+      changed_when: false
+      failed_when: false
+      loop: "{{ groups['baremetal'] | default([]) }}"
+      when: 
+        - run_basic_tests | default(true)
+        - groups['baremetal'] is defined
+        - groups['baremetal'] | length > 0
+
+    - name: Check default gateway on baremetal hosts
+      delegate_to: "{{ item }}"
+      ansible.builtin.shell: "ip route | grep default || echo 'No default route'"
+      register: default_route_status
+      changed_when: false
+      failed_when: false
+      loop: "{{ groups['baremetal'] | default([]) }}"
+      when: 
+        - run_basic_tests | default(true)
+        - groups['baremetal'] is defined
+        - groups['baremetal'] | length > 0
+
+    - name: Test internet connectivity on baremetal hosts
+      delegate_to: "{{ item }}"
+      ansible.builtin.shell: "ping -c 3 8.8.8.8 || echo 'Cannot reach internet'"
+      register: internet_ping_status
+      changed_when: false
+      failed_when: false
+      loop: "{{ groups['baremetal'] | default([]) }}"
+      when: 
+        - run_basic_tests | default(true)
+        - groups['baremetal'] is defined
+        - groups['baremetal'] | length > 0
+
+    - name: Test DNS resolution on baremetal hosts
+      delegate_to: "{{ item }}"
+      ansible.builtin.shell: "ping -c 3 www.redhat.com || echo 'Cannot resolve domain'"
+      register: dns_resolution_status
+      changed_when: false
+      failed_when: false
+      loop: "{{ groups['baremetal'] | default([]) }}"
+      when: 
+        - run_basic_tests | default(true)
+        - groups['baremetal'] is defined
+        - groups['baremetal'] | length > 0
+
+    # Compile comprehensive network validation results
+    - name: Compile comprehensive network validation results using garden_shed data
+      ansible.builtin.set_fact:
+        network_results: >-
+          {{ network_results | combine({
+              item + '_comprehensive': {
+                'garden_shed_data': {
+                  'collection_status': network_inventory.get(item, {}).get('collection_status', 'unknown'),
+                  'network_adapters': network_inventory.get(item, {}).get('adapters', []),
+                  'total_adapters': network_inventory.get(item, {}).get('total_adapters', 0),
+                  'total_physical_ports': network_inventory.get(item, {}).get('total_physical_ports', 0),
+                  'mac_addresses': network_inventory.get(item, {}).get('mac_addresses', []),
+                  'port_status': network_inventory.get(item, {}).get('port_status', {}),
+                  'capabilities': adapter_capabilities.get(item, {})
+                },
+                'basic_validation': {
+                  'bond': {
+                    'status': (bonding_status.results | selectattr('item', 'equalto', item) | first).stdout | default('') not in 'No bonding interfaces found',
+                    'mode': vars.get('bond_mode_' + (item | regex_replace('[^a-zA-Z0-9]', '_')), 'none'),
+                    'passed': true
+                  },
+                  'vlan': {
+                    'status': (vlan_status.results | selectattr('item', 'equalto', item) | first).stdout | default('') not in 'No VLANs found',
+                    'details': ((vlan_status.results | selectattr('item', 'equalto', item) | first).stdout | default('No VLANs found')).split('\n')
+                  },
+                  'routing': {
+                    'has_default_route': (default_route_status.results | selectattr('item', 'equalto', item) | first).stdout | default('') not in 'No default route',
+                    'internet_reachable': (internet_ping_status.results | selectattr('item', 'equalto', item) | first).stdout | default('') not in 'Cannot reach internet',
+                    'dns_resolution': (dns_resolution_status.results | selectattr('item', 'equalto', item) | first).stdout | default('') not in 'Cannot resolve domain'
+                  }
+                }
+              }
+            })
+          }}
+      loop: "{{ groups['baremetal'] | default([]) }}"
+      when: 
+        - run_basic_tests | default(true)
+        - groups['baremetal'] is defined
+        - groups['baremetal'] | length > 0
+        - bonding_status.results is defined
+        - vlan_status.results is defined
+        - default_route_status.results is defined
+        - internet_ping_status.results is defined
+        - dns_resolution_status.results is defined
+
+    # Save validation results
+    - name: Register validation end
+      ansible.builtin.set_fact:
+        network_validation_end: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      run_once: true
+
+    - name: Consolidate network validation results with garden_shed integration
+      ansible.builtin.set_fact:
+        network_results: >-
+          {{ network_results | combine({
+              'validation_metadata': {
+                'start_time': network_validation_start,
+                'end_time': network_validation_end,
+                'data_source': 'garden_shed',
+                'garden_shed_collection_summary': data_collection_summary | default({}),
+                'network_inventory': network_inventory,
+                'adapter_capabilities': adapter_capabilities,
+                'connectivity_test': connectivity_test.stdout,
+                'switch_connectivity': switch_connectivity_test.stdout | default('')
+              }
+            })
+          }}
+
+    - name: Store network validation results
+      ansible.builtin.set_fact:
+        validation_results: >-
+          {{ (validation_results | default({}) if validation_results is mapping else {}) |
+             combine({
+               'network': {
+                 'start_time': network_validation_start,
+                 'end_time': network_validation_end,
+                 'data_source': 'garden_shed',
+                 'results': network_results,
+                 'summary': {
+                   'total_hosts': groups['baremetal'] | length,
+                   'garden_shed_successful': (network_inventory | dict2items | list | length),
+                   'garden_shed_failed': (groups['baremetal'] | difference(network_inventory.keys() | list) | length),
+                   'basic_tests_enabled': run_basic_tests | default(true),
+                   'advanced_lacp_enabled': run_advanced_lacp | default(true),
+                   'comprehensive_tests_completed': (network_results | dict2items | selectattr('key', 'match', '.*_comprehensive$') | list | length) if network_results is mapping else 0,
+                   'lacp_tests_run': (network_results | dict2items | selectattr('value.lacp_test_success', 'defined') | list | length) if network_results is mapping else 0,
+                   'lacp_tests_successful': (network_results | dict2items | selectattr('value.lacp_test_success', 'defined') | selectattr('value.lacp_test_success') | list | length) if network_results is mapping else 0,
+                   'total_network_adapters': (network_inventory | dict2items | map(attribute='value.total_adapters') | map('default', 0) | sum),
+                   'total_physical_ports': (network_inventory | dict2items | map(attribute='value.total_physical_ports') | map('default', 0) | sum),
+                   'total_mac_addresses': (network_inventory | dict2items | map(attribute='value.mac_addresses') | map('default', []) | map('length') | sum)
+                 }
+               }
+             })
+          }}
+      delegate_to: localhost
+      run_once: true
+
+    # Update check counters for final report
+    - name: Update check counters for garden_shed enhanced validation
+      ansible.builtin.set_fact:
+        total_checks: >-
+          {{ total_checks | default(0) | int + groups['baremetal'] | length + 10 }}
+        passed_checks: >-
+          {{ passed_checks | default(0) | int +
+             validation_results.network.summary.garden_shed_successful | default(0) +
+             validation_results.network.summary.lacp_tests_successful | default(0) + 5
+          }}
+        failed_checks: >-
+          {{ failed_checks | default(0) | int +
+             validation_results.network.summary.garden_shed_failed | default(0) +
+             (validation_results.network.summary.lacp_tests_run | default(0) - validation_results.network.summary.lacp_tests_successful | default(0)) + 5
+          }}
+      delegate_to: localhost
+      run_once: true
+
+    - name: Display comprehensive network validation summary with garden_shed integration
+      ansible.builtin.debug:
+        msg:
+          - "=== Comprehensive Network Validation Summary (Garden Shed Enhanced) ==="
+          - "Total hosts tested: {{ groups['baremetal'] | length }}"
+          - "Garden Shed data collection - Successful: {{ validation_results.network.summary.garden_shed_successful | default(0) }}, Failed: {{ validation_results.network.summary.garden_shed_failed | default(0) }}"
+          - "Total network adapters discovered: {{ validation_results.network.summary.total_network_adapters | default(0) }}"
+          - "Total physical ports discovered: {{ validation_results.network.summary.total_physical_ports | default(0) }}"
+          - "Total MAC addresses discovered: {{ validation_results.network.summary.total_mac_addresses | default(0) }}"
+          - "Basic network tests: {{ 'ENABLED' if run_basic_tests | default(true) else 'DISABLED' }}"
+          - "Advanced LACP tests: {{ 'ENABLED' if run_advanced_lacp | default(true) else 'DISABLED' }}"
+          - "LACP tests run: {{ validation_results.network.summary.lacp_tests_run | default(0) }}"
+          - "LACP tests successful: {{ validation_results.network.summary.lacp_tests_successful | default(0) }}"
+          - "Comprehensive validation results available: {{ validation_results.network.summary.comprehensive_tests_completed | default(0) }}"
+          - "Results saved to: {{ results_output_dir }}"
+      run_once: true

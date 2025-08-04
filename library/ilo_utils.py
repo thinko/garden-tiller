@@ -13,6 +13,8 @@ import functools
 import pybreaker
 import structlog
 import argparse
+import requests
+import base64
 from datetime import datetime
 import urllib3
 
@@ -340,25 +342,39 @@ class IloProUtils:
             all_details["errors_encountered"].append(f"product_name: {str(e)}")
             all_details["partial_data"] = True
         
-        # Try to get power status
+        # Try to get power status - Direct Redfish HTTP as primary method
         try:
-            all_details["power_status"] = self.get_host_power_status()
-            logger.debug("Successfully retrieved power status", ilo_ip=self.ilo_ip)
+            logger.info("Attempting power status via direct Redfish HTTP", ilo_ip=self.ilo_ip)
+            all_details["power_status"] = self.get_power_status_via_redfish_http()
+            logger.debug("Successfully retrieved power status via direct Redfish HTTP", ilo_ip=self.ilo_ip)
         except Exception as e:
-            logger.warning("Failed to get power status", ilo_ip=self.ilo_ip, error=str(e))
-            all_details["power_status"] = "Unknown"
-            all_details["errors_encountered"].append(f"power_status: {str(e)}")
-            all_details["partial_data"] = True
+            logger.warning("Direct Redfish HTTP power status failed, trying proliantutils fallback", 
+                          ilo_ip=self.ilo_ip, error=str(e))
+            try:
+                all_details["power_status"] = self.get_host_power_status()
+                logger.debug("Successfully retrieved power status via proliantutils fallback", ilo_ip=self.ilo_ip)
+            except Exception as e2:
+                logger.warning("Failed to get power status", ilo_ip=self.ilo_ip, error=str(e2))
+                all_details["power_status"] = "Unknown"
+                all_details["errors_encountered"].append(f"power_status: Direct Redfish HTTP failed ({str(e)}), proliantutils failed ({str(e2)})")
+                all_details["partial_data"] = True
         
-        # Try to get firmware version
+        # Try to get firmware version - Direct Redfish HTTP as primary method
         try:
-            all_details["firmware_version"] = self.get_firmware_version()
-            logger.debug("Successfully retrieved firmware version", ilo_ip=self.ilo_ip)
+            logger.info("Attempting firmware version via direct Redfish HTTP", ilo_ip=self.ilo_ip)
+            all_details["firmware_version"] = self.get_firmware_version_via_redfish_http()
+            logger.debug("Successfully retrieved firmware version via direct Redfish HTTP", ilo_ip=self.ilo_ip)
         except Exception as e:
-            logger.warning("Failed to get firmware version", ilo_ip=self.ilo_ip, error=str(e))
-            all_details["firmware_version"] = "Unknown"
-            all_details["errors_encountered"].append(f"firmware_version: {str(e)}")
-            all_details["partial_data"] = True
+            logger.warning("Direct Redfish HTTP firmware version failed, trying proliantutils fallback", 
+                          ilo_ip=self.ilo_ip, error=str(e))
+            try:
+                all_details["firmware_version"] = self.get_firmware_version()
+                logger.debug("Successfully retrieved firmware version via proliantutils fallback", ilo_ip=self.ilo_ip)
+            except Exception as e2:
+                logger.warning("Failed to get firmware version", ilo_ip=self.ilo_ip, error=str(e2))
+                all_details["firmware_version"] = "Unknown"
+                all_details["errors_encountered"].append(f"firmware_version: Direct Redfish HTTP failed ({str(e)}), proliantutils failed ({str(e2)})")
+                all_details["partial_data"] = True
         
         # Try to get host UUID
         try:
@@ -370,33 +386,49 @@ class IloProUtils:
             all_details["errors_encountered"].append(f"host_uuid: {str(e)}")
             all_details["partial_data"] = True
         
-        # Try to get boot settings
+        # Try to get boot settings - Direct Redfish HTTP as primary method
         try:
-            one_time_boot = self.get_one_time_boot()
-            persistent_boot = self.get_persistent_boot_device()
-            all_details["boot_settings"] = {
-                "one_time_boot": one_time_boot,
-                "persistent_boot": persistent_boot
-            }
-            logger.debug("Successfully retrieved boot settings", ilo_ip=self.ilo_ip)
+            logger.info("Attempting boot settings via direct Redfish HTTP", ilo_ip=self.ilo_ip)
+            boot_settings_direct = self.get_boot_settings_via_redfish_http()
+            all_details["boot_settings"] = boot_settings_direct
+            logger.debug("Successfully retrieved boot settings via direct Redfish HTTP", ilo_ip=self.ilo_ip)
         except Exception as e:
-            logger.warning("Failed to get boot settings", ilo_ip=self.ilo_ip, error=str(e))
-            all_details["boot_settings"] = {
-                "one_time_boot": "Unknown",
-                "persistent_boot": "Unknown"
-            }
-            all_details["errors_encountered"].append(f"boot_settings: {str(e)}")
-            all_details["partial_data"] = True
+            logger.warning("Direct Redfish HTTP boot settings failed, trying proliantutils fallback", 
+                          ilo_ip=self.ilo_ip, error=str(e))
+            try:
+                one_time_boot = self.get_one_time_boot()
+                persistent_boot = self.get_persistent_boot_device()
+                all_details["boot_settings"] = {
+                    "one_time_boot": one_time_boot,
+                    "persistent_boot": persistent_boot
+                }
+                logger.debug("Successfully retrieved boot settings via proliantutils fallback", ilo_ip=self.ilo_ip)
+            except Exception as e2:
+                logger.warning("Failed to get boot settings", ilo_ip=self.ilo_ip, error=str(e2))
+                all_details["boot_settings"] = {
+                    "one_time_boot": "Unknown",
+                    "persistent_boot": "Unknown"
+                }
+                all_details["errors_encountered"].append(f"boot_settings: Direct Redfish HTTP failed ({str(e)}), proliantutils failed ({str(e2)})")
+                all_details["partial_data"] = True
         
-        # Try to get health status
+        # Try to get health status - Direct Redfish HTTP as primary method  
         try:
-            all_details["health_status"] = self.get_host_health_status()
-            logger.debug("Successfully retrieved health status", ilo_ip=self.ilo_ip)
+            logger.info("Attempting health status via direct Redfish HTTP", ilo_ip=self.ilo_ip)
+            health_status_direct = self.get_health_status_via_redfish_http()
+            all_details["health_status"] = {"system_health": health_status_direct}
+            logger.debug("Successfully retrieved health status via direct Redfish HTTP", ilo_ip=self.ilo_ip)
         except Exception as e:
-            logger.warning("Failed to get health status", ilo_ip=self.ilo_ip, error=str(e))
-            all_details["health_status"] = {"system_health": "Unknown"}
-            all_details["errors_encountered"].append(f"health_status: {str(e)}")
-            all_details["partial_data"] = True
+            logger.warning("Direct Redfish HTTP health status failed, trying proliantutils fallback", 
+                          ilo_ip=self.ilo_ip, error=str(e))
+            try:
+                all_details["health_status"] = self.get_host_health_status()
+                logger.debug("Successfully retrieved health status via proliantutils fallback", ilo_ip=self.ilo_ip)
+            except Exception as e2:
+                logger.warning("Failed to get health status", ilo_ip=self.ilo_ip, error=str(e2))
+                all_details["health_status"] = {"system_health": "Unknown"}
+                all_details["errors_encountered"].append(f"health_status: Direct Redfish HTTP failed ({str(e)}), proliantutils failed ({str(e2)})")
+                all_details["partial_data"] = True
         
         # Try to get network adapters with enhanced details
         try:
@@ -534,12 +566,101 @@ class IloProUtils:
     @retry_with_backoff(max_tries=3, initial_delay=1)
     @breaker
     def get_network_adapter_details(self):
-        """Get detailed network adapter information with iLO4 compatibility"""
+        """Get detailed network adapter information with enhanced Redfish HTTP support
+        
+        Uses direct Redfish HTTP requests as the primary method for maximum compatibility
+        and reliability, with proliantutils and XML as fallback methods.
+        """
         logger.info("Getting detailed network adapter information", ilo_ip=self.ilo_ip)
+        
+        # Primary method: Direct Redfish HTTP requests
+        try:
+            logger.info("Attempting direct Redfish HTTP method for network adapters", ilo_ip=self.ilo_ip)
+            redfish_result = self.get_network_adapters_via_redfish_http()
+            
+            if redfish_result and (redfish_result.get('adapters') or redfish_result.get('host_mac_addresses')):
+                # Convert the direct Redfish result to the expected format
+                enhanced_adapters = []
+                host_mac_addresses = redfish_result.get('host_mac_addresses', [])
+                
+                # Process detailed adapter information if available
+                detailed_adapters = redfish_result.get('adapters', [])
+                
+                if detailed_adapters:
+                    # We have detailed adapter info - merge with MAC addresses from HostCorrelation
+                    for i, adapter in enumerate(detailed_adapters):
+                        # Get MAC address from HostCorrelation if available and adapter MAC is unknown
+                        mac_from_host_correlation = host_mac_addresses[i] if i < len(host_mac_addresses) else 'Unknown'
+                        adapter_mac = adapter.get('mac_address', 'Unknown')
+                        permanent_mac = adapter.get('permanent_mac_address', 'Unknown')
+                        
+                        # Use HostCorrelation MAC if adapter MAC is unknown or null
+                        if adapter_mac in ['Unknown', None, ''] and mac_from_host_correlation != 'Unknown':
+                            adapter_mac = mac_from_host_correlation
+                        if permanent_mac in ['Unknown', None, ''] and mac_from_host_correlation != 'Unknown':
+                            permanent_mac = mac_from_host_correlation
+                        
+                        enhanced_adapter = {
+                            'name': adapter.get('name', f'Network Adapter {i+1}'),
+                            'mac_address': adapter_mac,
+                            'permanent_mac_address': permanent_mac,
+                            'speed': adapter.get('speed_mbps', 'Unknown'),
+                            'status': adapter.get('status', 'Unknown'),
+                            'link_status': adapter.get('link_status', 'Unknown'),
+                            'full_duplex': adapter.get('full_duplex', 'Unknown'),
+                            'mtu_size': adapter.get('mtu_size', 'Unknown'),
+                            'auto_neg': adapter.get('auto_neg', 'Unknown'),
+                            'collection_method': 'direct_redfish_http_merged'
+                        }
+                        enhanced_adapters.append(enhanced_adapter)
+                    
+                    # If we have more MAC addresses than detailed adapters, add the extras
+                    if len(host_mac_addresses) > len(detailed_adapters):
+                        for i in range(len(detailed_adapters), len(host_mac_addresses)):
+                            mac = host_mac_addresses[i]
+                            enhanced_adapter = {
+                                'name': f'Network Adapter {i+1}',
+                                'mac_address': mac,
+                                'permanent_mac_address': mac,
+                                'speed': 'Unknown',
+                                'status': 'Unknown',
+                                'link_status': 'Unknown',
+                                'collection_method': 'direct_redfish_http_host_correlation'
+                            }
+                            enhanced_adapters.append(enhanced_adapter)
+                
+                else:
+                    # No detailed adapters, but we have MAC addresses from HostCorrelation
+                    for i, mac in enumerate(host_mac_addresses):
+                        enhanced_adapter = {
+                            'name': f'Network Adapter {i+1}',
+                            'mac_address': mac,
+                            'permanent_mac_address': mac,
+                            'speed': 'Unknown',
+                            'status': 'Unknown',
+                            'link_status': 'Unknown',
+                            'collection_method': 'direct_redfish_http_host_correlation'
+                        }
+                        enhanced_adapters.append(enhanced_adapter)
+                
+                logger.info("Successfully retrieved network adapters via direct Redfish HTTP", 
+                           ilo_ip=self.ilo_ip, 
+                           adapter_count=len(enhanced_adapters),
+                           mac_count=len(redfish_result.get('host_mac_addresses', [])))
+                return enhanced_adapters
+            else:
+                logger.warning("Direct Redfish HTTP method returned no useful data", ilo_ip=self.ilo_ip)
+                
+        except Exception as e:
+            logger.warning("Direct Redfish HTTP method failed, trying proliantutils fallback", 
+                          ilo_ip=self.ilo_ip, error=str(e))
+        
+        # Fallback method: proliantutils (original method)
         try:
             if self.use_redfish:
                 # Check if this method exists on the client (iLO4 compatibility issue)
                 if hasattr(self.client, 'get_nic_inventory'):
+                    logger.info("Trying proliantutils get_nic_inventory method", ilo_ip=self.ilo_ip)
                     # Get NIC inventory with more details
                     adapters = self.client.get_nic_inventory()
                     
@@ -555,11 +676,12 @@ class IloProUtils:
                                 'manufacturer': adapter.get('Manufacturer', 'Unknown'),
                                 'model': adapter.get('Model', 'Unknown'),
                                 'firmware_version': adapter.get('FirmwareVersion', 'Unknown'),
-                                'link_status': adapter.get('LinkStatus', 'Unknown')
+                                'link_status': adapter.get('LinkStatus', 'Unknown'),
+                                'collection_method': 'proliantutils_redfish'
                             }
                             enhanced_adapters.append(enhanced_adapter)
                     
-                    logger.info("Retrieved detailed network adapter information via Redfish", 
+                    logger.info("Retrieved detailed network adapter information via proliantutils Redfish", 
                                ilo_ip=self.ilo_ip, 
                                adapter_count=len(enhanced_adapters))
                     return enhanced_adapters
@@ -571,7 +693,11 @@ class IloProUtils:
                     if xml_data.get("status") == "success":
                         parsed_data = self.parse_xml_hardware_data(xml_data["xml_data"])
                         if parsed_data and "network_adapters" in parsed_data:
-                            return parsed_data["network_adapters"].get("adapters", [])
+                            adapters = parsed_data["network_adapters"].get("adapters", [])
+                            # Add collection method to each adapter
+                            for adapter in adapters:
+                                adapter['collection_method'] = 'xml_endpoint'
+                            return adapters
                     return []
             else:
                 # RIBCL fallback - try XML endpoint if available
@@ -580,11 +706,15 @@ class IloProUtils:
                 if xml_data.get("status") == "success":
                     parsed_data = self.parse_xml_hardware_data(xml_data["xml_data"])
                     if parsed_data and "network_adapters" in parsed_data:
-                        return parsed_data["network_adapters"].get("adapters", [])
+                        adapters = parsed_data["network_adapters"].get("adapters", [])
+                        # Add collection method to each adapter
+                        for adapter in adapters:
+                            adapter['collection_method'] = 'ribcl_xml'
+                        return adapters
                 return []
                 
         except Exception as e:
-            logger.error("Failed to get detailed network adapter information", 
+            logger.error("Failed to get detailed network adapter information via proliantutils", 
                         ilo_ip=self.ilo_ip, error=str(e))
             # Try XML endpoint as final fallback
             try:
@@ -593,7 +723,11 @@ class IloProUtils:
                 if xml_data.get("status") == "success":
                     parsed_data = self.parse_xml_hardware_data(xml_data["xml_data"])
                     if parsed_data and "network_adapters" in parsed_data:
-                        return parsed_data["network_adapters"].get("adapters", [])
+                        adapters = parsed_data["network_adapters"].get("adapters", [])
+                        # Add collection method to each adapter
+                        for adapter in adapters:
+                            adapter['collection_method'] = 'xml_fallback'
+                        return adapters
             except Exception as xml_e:
                 logger.warning("XML endpoint fallback also failed", ilo_ip=self.ilo_ip, error=str(xml_e))
             return []
@@ -1605,6 +1739,8 @@ class IloProUtils:
                 fallback_inventory = {
                     "collection_method": "XML_endpoint_primary",
                     "collection_timestamp": datetime.now().isoformat(),
+                   
+                   
                     "ilo_ip": self.ilo_ip,
                     "api_type": "XML",
                     "fallback_used": True,
@@ -1673,73 +1809,254 @@ class IloProUtils:
             else:
                 logger.warning("XML parsing failed, trying alternative methods", ilo_ip=self.ilo_ip)
         
-        # If XML endpoint also failed, try alternative discovery methods
-        logger.info("Attempting alternative hardware discovery methods", ilo_ip=self.ilo_ip)
+        # If XML endpoint also failed, use minimal fallback
+        logger.info("Using minimal fallback inventory structure", ilo_ip=self.ilo_ip)
+        alt_inventory = {
+            "collection_method": "minimal_fallback",
+            "collection_timestamp": datetime.now().isoformat(),
+            "ilo_ip": self.ilo_ip,
+            "api_type": "Fallback",
+            "fallback_used": True,
+            "bmc_api_failed": True,
+            "xml_endpoint_failed": xml_data.get("status") != "success",
+            "collection_status": "minimal_data_only",
+            "errors": ["BMC API failed", "XML endpoint failed"],
+            "server_info": {"error": "Not available"},
+            "network_adapters": {"adapters": [], "adapter_count": 0},
+            "health_status": {"system_health": "Unknown"},
+            "processors": {"error": "Not available", "processor_count": 0},
+            "memory": {"error": "Not available", "module_count": 0},
+            "storage": {"error": "Not available", "device_count": 0},
+            "power_thermal": {"error": "Not available"},
+            "bios": {"version": "Unknown", "error": "Not available"},
+            "smartarray": {"error": "Not available", "controllers": [], "logical_drives": [], "physical_drives": []},
+            "hba_adapters": {"error": "Not available", "adapters": [], "adapter_count": 0},
+            "usb_devices": {"error": "Not available", "ports": [], "devices": [], "port_count": 0, "device_count": 0},
+            "power_supplies": {"error": "Not available", "power_supplies": []},
+            "fans": {"error": "Not available", "fans": []},
+            "ilo_enhanced": {"error": "Not available"},
+            "collection_success_rate": "0/13",
+            "hardware_summary": {
+                "server_manufacturer": "Unknown",
+                "server_model": "Unknown",
+                "total_processors": 0,
+                "total_memory_gb": 0,
+                "total_storage_devices": 0,
+                "total_network_adapters": 0,
+                "smartarray_controllers": 0,
+                "power_supplies": 0,
+                "fans": 0,
+                "hba_adapters": 0,
+                "usb_ports": 0
+            }
+        }
+        
+        return alt_inventory
+    
+    @retry_with_backoff(max_tries=3, initial_delay=1)
+    @breaker
+    def get_power_status_via_redfish_http(self):
+        """Get power status using direct Redfish HTTP requests"""
+        logger.info("Getting power status via direct Redfish HTTP", ilo_ip=self.ilo_ip)
+        
         try:
-            alternative_data = self.get_hardware_via_alternative_methods()
+            # Prepare authentication header
+            auth_string = f"{self.ilo_username}:{self.ilo_password}"
+            auth_bytes = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
+            headers = {
+                'Authorization': f'Basic {auth_bytes}',
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            }
             
-            if alternative_data.get("successful_sources"):
-                # Convert alternative discovery data to enhanced inventory format
-                alt_inventory = {
-                    "collection_method": "alternative_discovery",
-                    "collection_timestamp": alternative_data["collection_timestamp"],
-                    "ilo_ip": self.ilo_ip,
-                    "api_type": "Mixed",
-                    "fallback_used": True,
-                    "bmc_api_failed": True,
-                    "xml_endpoint_failed": xml_data.get("status") != "success",
-                    "collection_status": "partial_via_alternatives",
-                    "alternative_sources": alternative_data["successful_sources"],
-                    "errors": alternative_data.get("errors", [])
-                }
-                
-                # Extract the best available data
-                alt_inventory.update({
-                    "server_info": alternative_data.get("server_info", {"error": "Not available"}),
-                    "network_adapters": alternative_data.get("network_adapters", {"adapters": [], "adapter_count": 0}),
-                    "health_status": alternative_data.get("health_status", {"system_health": "Unknown"}),
-                    "processors": alternative_data.get("processors", {"error": "Not available via alternative methods", "processor_count": 0}),
-                    "memory": alternative_data.get("memory", {"error": "Not available via alternative methods", "module_count": 0}),
-                    "storage": {"error": "Not available via alternative methods", "device_count": 0},
-                    "power_thermal": {"error": "Not available via alternative methods"},
-                    "bios": {"version": "Unknown", "error": "Not available via alternative methods"},
-                    "smartarray": {"error": "Not available via alternative methods", "controllers": [], "logical_drives": [], "physical_drives": []},
-                    "hba_adapters": {"error": "Not available via alternative methods", "adapters": [], "adapter_count": 0},
-                    "usb_devices": {"error": "Not available via alternative methods", "ports": [], "devices": [], "port_count": 0, "device_count": 0},
-                    "power_supplies": {"error": "Not available via alternative methods", "power_supplies": []},
-                    "fans": {"error": "Not available via alternative methods", "fans": []},
-                    "ilo_enhanced": {"error": "Not available via alternative methods"}
-                })
-                
-                success_count = len([k for k, v in alt_inventory.items() 
-                                   if k in ["server_info", "network_adapters", "health_status"] 
-                                   and not isinstance(v, dict) or "error" not in v])
-                alt_inventory["collection_success_rate"] = f"{success_count}/13"
-                
-                # Add hardware summary
-                alt_inventory["hardware_summary"] = {
-                    "server_manufacturer": alt_inventory.get("server_info", {}).get("manufacturer", "Unknown"),
-                    "server_model": alt_inventory.get("server_info", {}).get("model", "Unknown"),
-                    "total_processors": alt_inventory.get("processors", {}).get("processor_count", 0),
-                    "total_memory_gb": alt_inventory.get("memory", {}).get("total_size_gb", 0),
-                    "total_storage_devices": 0,
-                    "total_network_adapters": alt_inventory.get("network_adapters", {}).get("adapter_count", 0),
-                    "smartarray_controllers": 0,
-                    "power_supplies": 0,
-                    "fans": 0,
-                    "hba_adapters": 0,
-                    "usb_ports": 0
-                }
-                
-                logger.info("Successfully collected hardware data via alternative methods", 
-                           ilo_ip=self.ilo_ip,
-                           sources=alternative_data["successful_sources"])
-                
-                return alt_inventory
-            else:
-                logger.error("Alternative discovery methods also failed", ilo_ip=self.ilo_ip)
+            # Get system information
+            system_url = f"https://{self.ilo_ip}/redfish/v1/Systems/1/"
+            
+            logger.debug("Making Redfish request for power status", 
+                        url=system_url, ilo_ip=self.ilo_ip)
+            
+            response = requests.get(
+                system_url, 
+                headers=headers, 
+                verify=self.verify_ssl, 
+                timeout=30
+            )
+            
+            response.raise_for_status()
+            system_data = response.json()
+            
+            power_state = system_data.get('PowerState', 'Unknown')
+            
+            logger.info("Successfully retrieved power status via direct Redfish HTTP", 
+                       ilo_ip=self.ilo_ip, 
+                       power_state=power_state)
+            
+            return power_state
+            
         except Exception as e:
-            logger.error("Alternative discovery methods failed", ilo_ip=self.ilo_ip, error=str(e))
+            logger.error("Failed to get power status via direct Redfish HTTP", 
+                        ilo_ip=self.ilo_ip, error=str(e))
+            raise
+
+    @retry_with_backoff(max_tries=3, initial_delay=1)
+    @breaker
+    def get_firmware_version_via_redfish_http(self):
+        """Get firmware version using direct Redfish HTTP requests"""
+        logger.info("Getting firmware version via direct Redfish HTTP", ilo_ip=self.ilo_ip)
+        
+        try:
+            # Prepare authentication header
+            auth_string = f"{self.ilo_username}:{self.ilo_password}"
+            auth_bytes = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
+            headers = {
+                'Authorization': f'Basic {auth_bytes}',
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            }
+            
+            # Get manager information (iLO firmware)
+            manager_url = f"https://{self.ilo_ip}/redfish/v1/Managers/1/"
+            
+            logger.debug("Making Redfish request for firmware version", 
+                        url=manager_url, ilo_ip=self.ilo_ip)
+            
+            response = requests.get(
+                manager_url, 
+                headers=headers, 
+                verify=self.verify_ssl, 
+                timeout=30
+            )
+            
+            response.raise_for_status()
+            manager_data = response.json()
+            
+            firmware_version = manager_data.get('FirmwareVersion', 'Unknown')
+            
+            logger.info("Successfully retrieved firmware version via direct Redfish HTTP", 
+                       ilo_ip=self.ilo_ip, 
+                       firmware_version=firmware_version)
+            
+            return firmware_version
+            
+        except Exception as e:
+            logger.error("Failed to get firmware version via direct Redfish HTTP", 
+                        ilo_ip=self.ilo_ip, error=str(e))
+            raise
+
+    @retry_with_backoff(max_tries=3, initial_delay=1)
+    @breaker
+    def get_health_status_via_redfish_http(self):
+        """Get health status using direct Redfish HTTP requests"""
+        logger.info("Getting health status via direct Redfish HTTP", ilo_ip=self.ilo_ip)
+        
+        try:
+            # Prepare authentication header
+            auth_string = f"{self.ilo_username}:{self.ilo_password}"
+            auth_bytes = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
+            headers = {
+                'Authorization': f'Basic {auth_bytes}',
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            }
+            
+            # Get system information for health status
+            system_url = f"https://{self.ilo_ip}/redfish/v1/Systems/1/"
+            
+            logger.debug("Making Redfish request for health status", 
+                        url=system_url, ilo_ip=self.ilo_ip)
+            
+            response = requests.get(
+                system_url, 
+                headers=headers, 
+                verify=self.verify_ssl, 
+                timeout=30
+            )
+            
+            response.raise_for_status()
+            system_data = response.json()
+            
+            # Extract health information from Status object
+            status_info = system_data.get('Status', {})
+            health_status = status_info.get('Health', 'Unknown')
+            state = status_info.get('State', 'Unknown')
+            
+            # Combine health and state for more comprehensive status
+            if health_status != 'Unknown' and state != 'Unknown':
+                full_health_status = f"{health_status} ({state})"
+            elif health_status != 'Unknown':
+                full_health_status = health_status
+            elif state != 'Unknown':
+                full_health_status = state
+            else:
+                full_health_status = 'Unknown'
+            
+            logger.info("Successfully retrieved health status via direct Redfish HTTP", 
+                       ilo_ip=self.ilo_ip, 
+                       health_status=full_health_status)
+            
+            return full_health_status
+            
+        except Exception as e:
+            logger.error("Failed to get health status via direct Redfish HTTP", 
+                        ilo_ip=self.ilo_ip, error=str(e))
+            raise
+
+    @retry_with_backoff(max_tries=3, initial_delay=1)
+    @breaker
+    def get_boot_settings_via_redfish_http(self):
+        """Get boot settings using direct Redfish HTTP requests"""
+        logger.info("Getting boot settings via direct Redfish HTTP", ilo_ip=self.ilo_ip)
+        
+        try:
+            # Prepare authentication header
+            auth_string = f"{self.ilo_username}:{self.ilo_password}"
+            auth_bytes = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
+            headers = {
+                'Authorization': f'Basic {auth_bytes}',
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            }
+            
+            # Get system information for boot settings
+            system_url = f"https://{self.ilo_ip}/redfish/v1/Systems/1/"
+            
+            logger.debug("Making Redfish request for boot settings", 
+                        url=system_url, ilo_ip=self.ilo_ip)
+            
+            response = requests.get(
+                system_url, 
+                headers=headers, 
+                verify=self.verify_ssl, 
+                timeout=30
+            )
+            
+            response.raise_for_status()
+            system_data = response.json()
+            
+            # Extract boot information
+            boot_info = system_data.get('Boot', {})
+            boot_settings = {
+                'boot_source_override_enabled': boot_info.get('BootSourceOverrideEnabled', 'Unknown'),
+                'boot_source_override_target': boot_info.get('BootSourceOverrideTarget', 'Unknown'),
+                'boot_source_override_mode': boot_info.get('BootSourceOverrideMode', 'Unknown'),
+                'uefi_target_boot_source_override': boot_info.get('UefiTargetBootSourceOverride', 'Unknown')
+            }
+            
+            # Also try to get boot order information
+            boot_order = boot_info.get('BootOrder', [])
+            if boot_order:
+                boot_settings['boot_order'] = boot_order
+            
+            logger.info("Successfully retrieved boot settings via direct Redfish HTTP", 
+                       ilo_ip=self.ilo_ip, 
+                       boot_settings=boot_settings)
+            
+            return boot_settings
+            
+        except Exception as e:
+            logger.error("Failed to get boot settings via direct Redfish HTTP", 
+                        ilo_ip=self.ilo_ip, error=str(e))
+            raise
         
         # If all methods failed
         logger.error("All collection methods failed", ilo_ip=self.ilo_ip)
@@ -1783,6 +2100,174 @@ class IloProUtils:
                 "usb_ports": 0
             }
         }
+    
+    @retry_with_backoff(max_tries=3, initial_delay=1)
+    @breaker
+    def get_network_adapters_via_redfish_http(self):
+        """Get network adapter information using direct Redfish HTTP requests
+        
+        This method bypasses proliantutils issues by making direct HTTPS requests
+        to the Redfish API endpoints, which provides more reliable MAC address collection.
+        """
+        logger.info("Getting network adapters via direct Redfish HTTP", ilo_ip=self.ilo_ip)
+        
+        try:
+            # Prepare authentication header
+            auth_string = f"{self.ilo_username}:{self.ilo_password}"
+            auth_bytes = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
+            headers = {
+                'Authorization': f'Basic {auth_bytes}',
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            }
+            
+            # First, get the main system information
+            system_url = f"https://{self.ilo_ip}/redfish/v1/Systems/1/"
+            
+            logger.debug("Making Redfish request to Systems endpoint", 
+                        url=system_url, ilo_ip=self.ilo_ip)
+            
+            response = requests.get(
+                system_url, 
+                headers=headers, 
+                verify=self.verify_ssl, 
+                timeout=30
+            )
+            
+            response.raise_for_status()
+            system_data = response.json()
+            
+            # Extract MAC addresses from HostCorrelation if available
+            mac_addresses = []
+            if 'HostCorrelation' in system_data and 'HostMACAddress' in system_data['HostCorrelation']:
+                mac_addresses = system_data['HostCorrelation']['HostMACAddress']
+                logger.info("Found MAC addresses in HostCorrelation", 
+                           ilo_ip=self.ilo_ip, 
+                           mac_count=len(mac_addresses),
+                           mac_addresses=mac_addresses)
+            
+            # Try to get additional network adapter details from EthernetInterfaces
+            adapters = []
+            try:
+                ethernet_url = f"https://{self.ilo_ip}/redfish/v1/Systems/1/EthernetInterfaces/"
+                logger.debug("Making Redfish request to EthernetInterfaces", 
+                            url=ethernet_url, ilo_ip=self.ilo_ip)
+                
+                eth_response = requests.get(
+                    ethernet_url, 
+                    headers=headers, 
+                    verify=self.verify_ssl, 
+                    timeout=30
+                )
+                
+                if eth_response.status_code == 200:
+                    eth_data = eth_response.json()
+                    if 'Members' in eth_data:
+                        for member in eth_data['Members']:
+                            if '@odata.id' in member:
+                                # Get detailed info for each adapter
+                                adapter_url = f"https://{self.ilo_ip}{member['@odata.id']}"
+                                try:
+                                    adapter_response = requests.get(
+                                        adapter_url, 
+                                        headers=headers, 
+                                        verify=self.verify_ssl, 
+                                        timeout=30
+                                    )
+                                    if adapter_response.status_code == 200:
+                                        adapter_info = adapter_response.json()
+                                        adapter_details = {
+                                            'name': adapter_info.get('Name', 'Unknown'),
+                                            'description': adapter_info.get('Description', 'Unknown'),
+                                            'mac_address': adapter_info.get('MACAddress', 'Unknown'),
+                                            'permanent_mac_address': adapter_info.get('PermanentMACAddress', 'Unknown'),
+                                            'speed_mbps': adapter_info.get('SpeedMbps', 'Unknown'),
+                                            'full_duplex': adapter_info.get('FullDuplex', 'Unknown'),
+                                            'mtu_size': adapter_info.get('MTUSize', 'Unknown'),
+                                            'auto_neg': adapter_info.get('AutoNeg', 'Unknown'),
+                                            'link_status': adapter_info.get('LinkStatus', 'Unknown'),
+                                            'status': adapter_info.get('Status', {}).get('Health', 'Unknown'),
+                                            'firmware_version': adapter_info.get('UefiDevicePath', 'Unknown')
+                                        }
+                                        adapters.append(adapter_details)
+                                        logger.debug("Retrieved adapter details", 
+                                                    adapter_name=adapter_details['name'],
+                                                    mac_address=adapter_details['mac_address'])
+                                except Exception as e:
+                                    logger.warning("Failed to get details for adapter", 
+                                                  adapter_url=adapter_url, error=str(e))
+                                    continue
+                    
+                    logger.info("Retrieved ethernet interface details", 
+                               ilo_ip=self.ilo_ip, 
+                               adapter_count=len(adapters))
+                else:
+                    logger.warning("EthernetInterfaces endpoint returned non-200 status", 
+                                  status_code=eth_response.status_code)
+            
+            except Exception as e:
+                logger.warning("Failed to get EthernetInterfaces details", 
+                              ilo_ip=self.ilo_ip, error=str(e))
+            
+            # Combine results with preference for detailed adapter info
+            result = {
+                'adapters': adapters,
+                'host_mac_addresses': mac_addresses,
+                'system_info': {
+                    'manufacturer': system_data.get('Manufacturer', 'Unknown'),
+                    'model': system_data.get('Model', 'Unknown'),
+                    'serial_number': system_data.get('SerialNumber', 'Unknown'),
+                    'uuid': system_data.get('UUID', 'Unknown'),
+                    'power_state': system_data.get('PowerState', 'Unknown')
+                },
+                'collection_method': 'direct_redfish_http',
+                'total_mac_addresses': len(mac_addresses),
+                'detailed_adapters': len(adapters)
+            }
+            
+            logger.info("Successfully retrieved network information via direct Redfish HTTP", 
+                       ilo_ip=self.ilo_ip,
+                       total_macs=len(mac_addresses),
+                       detailed_adapters=len(adapters))
+            
+            return result
+            
+        except requests.exceptions.SSLError as e:
+            logger.error("SSL certificate error with Redfish HTTP request", 
+                        ilo_ip=self.ilo_ip, error=str(e))
+            raise Exception(f"SSL certificate verification failed. Try setting verify_ssl=False. Error: {str(e)}")
+        
+        except requests.exceptions.ConnectionError as e:
+            logger.error("Connection error with Redfish HTTP request", 
+                        ilo_ip=self.ilo_ip, error=str(e))
+            raise Exception(f"Failed to connect to iLO. Check IP address and network connectivity. Error: {str(e)}")
+        
+        except requests.exceptions.Timeout as e:
+            logger.error("Timeout error with Redfish HTTP request", 
+                        ilo_ip=self.ilo_ip, error=str(e))
+            raise Exception(f"Request timed out. iLO may be slow or unresponsive. Error: {str(e)}")
+        
+        except requests.exceptions.HTTPError as e:
+            logger.error("HTTP error with Redfish HTTP request", 
+                        ilo_ip=self.ilo_ip, 
+                        status_code=e.response.status_code if e.response else 'Unknown',
+                        error=str(e))
+            if e.response and e.response.status_code == 401:
+                raise Exception(f"Authentication failed. Check username and password. Error: {str(e)}")
+            else:
+                raise Exception(f"HTTP error occurred. Status: {e.response.status_code if e.response else 'Unknown'}. Error: {str(e)}")
+        
+        except json.JSONDecodeError as e:
+            logger.error("JSON decode error with Redfish HTTP response", 
+                        ilo_ip=self.ilo_ip, error=str(e))
+            raise Exception(f"Failed to parse JSON response from iLO. Error: {str(e)}")
+        
+        except Exception as e:
+            logger.error("Unexpected error with Redfish HTTP request", 
+                        ilo_ip=self.ilo_ip, error=str(e))
+            raise Exception(f"Unexpected error occurred: {str(e)}")
+    
+
 def get_ilo_info(ilo_ip, username, password, use_redfish=True, verify_ssl=False):
     """
     Main function to get all iLO information

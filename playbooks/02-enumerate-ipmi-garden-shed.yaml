@@ -1,0 +1,293 @@
+---
+# Garden-Tiller: IPMI/Hardware Enumeration Playbook (Garden Shed Enhanced)
+# Uses centralized garden_shed data to provide comprehensive hardware enumeration
+
+- name: Hardware enumeration using Garden Shed data
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [ipmi, hardware, all]
+  vars:
+    structlog_level: info
+  tasks:
+    - name: Register validation start
+      ansible.builtin.set_fact:
+        ipmi_enum_start: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      run_once: true
+
+    - name: Initialize check counters for standalone execution
+      ansible.builtin.set_fact:
+        total_checks: "{{ total_checks | default(0) }}"
+        passed_checks: "{{ passed_checks | default(0) }}"
+        failed_checks: "{{ failed_checks | default(0) }}"
+        warning_checks: "{{ warning_checks | default(0) }}"
+      run_once: true
+
+    - name: Check for available Garden Shed hardware data
+      ansible.builtin.debug:
+        msg:
+          - "Checking for Garden Shed hardware data..."
+          - "Available hosts with hardware data: {{ hardware_summary.keys() | list if hardware_summary is defined else 'None' }}"
+      run_once: true
+
+    - name: Validate hardware data availability
+      ansible.builtin.fail:
+        msg: "Garden Shed hardware data not available. Please run data collection first (00-data-collection-garden-shed.yaml)"
+      when: hardware_summary is not defined or hardware_summary | length == 0
+      run_once: true
+
+    # Process hardware enumeration from Garden Shed data
+    - name: Process hardware enumeration from Garden Shed data
+      ansible.builtin.set_fact:
+        ipmi_results: >-
+          {%- set processed_results = {} -%}
+          {%- for host_name, hw_data in hardware_summary.items() -%}
+            {%- set _ = processed_results.update({
+              host_name: {
+                'hostname': host_name,
+                'bmc_address': hw_data.get('bmc_address', garden_shed_data[host_name].bmc_address if host_name in garden_shed_data else 'Unknown'),
+                'collection_status': 'success',
+                'collection_method': 'garden_shed',
+                'timestamp': ansible_date_time.iso8601,
+                'system_info': {
+                  'manufacturer': hw_data.manufacturer,
+                  'model': hw_data.model,
+                  'serial_number': hw_data.serial_number,
+                  'uuid': hw_data.uuid,
+                  'hostname': hw_data.hostname,
+                  'power_state': hw_data.power_state,
+                  'post_state': hw_data.post_state,
+                  'system_type': hw_data.system_type
+                },
+                'processor_info': {
+                  'count': hw_data.processor.count,
+                  'model': hw_data.processor.model,
+                  'manufacturer': hw_data.processor.manufacturer,
+                  'total_cores': hw_data.processor.total_cores,
+                  'total_threads': hw_data.processor.total_threads,
+                  'max_speed_mhz': hw_data.processor.max_speed_mhz
+                },
+                'memory_info': {
+                  'total_gb': hw_data.memory.total_gb,
+                  'module_count': hw_data.memory.module_count,
+                  'modules': hw_data.memory.modules[:5] if hw_data.memory.modules | length > 5 else hw_data.memory.modules
+                },
+                'network_info': {
+                  'adapter_count': hw_data.network_adapter_count,
+                  'adapters': mac_address_data[host_name] if host_name in mac_address_data else []
+                },
+                'firmware_info': firmware_data[host_name] if host_name in firmware_data else {},
+                'validation': {
+                  'has_system_info': hw_data.manufacturer != 'Unknown' and hw_data.model != 'Unknown',
+                  'has_processor_info': hw_data.processor.count > 0,
+                  'has_memory_info': hw_data.memory.total_gb > 0,
+                  'has_network_info': hw_data.network_adapter_count > 0,
+                  'has_firmware_info': (firmware_data[host_name] if host_name in firmware_data else {}) | length > 0,
+                  'power_on': hw_data.power_state in ['On', 'PoweringOn'],
+                  'status': 'pass' if (hw_data.manufacturer != 'Unknown' and hw_data.processor.count > 0 and hw_data.memory.total_gb > 0) else 'warn'
+                }
+              }
+            }) -%}
+          {%- endfor -%}
+          {{ processed_results }}
+      run_once: true
+
+    # Handle hosts without Garden Shed data (fallback)
+    - name: Identify hosts without Garden Shed hardware data
+      ansible.builtin.set_fact:
+        missing_hardware_hosts: >-
+          {{ groups['baremetal'] | difference(hardware_summary.keys() | list) }}
+      run_once: true
+
+    - name: Add entries for hosts without hardware data
+      ansible.builtin.set_fact:
+        ipmi_results: >-
+          {%- set current_results = ipmi_results -%}
+          {%- for host_name in missing_hardware_hosts -%}
+            {%- set _ = current_results.update({
+              host_name: {
+                'hostname': host_name,
+                'bmc_address': hostvars[host_name].bmc_address | default('Unknown'),
+                'collection_status': 'failed',
+                'collection_method': 'garden_shed_fallback',
+                'error': 'No hardware data available from Garden Shed collection',
+                'timestamp': ansible_date_time.iso8601,
+                'system_info': {},
+                'processor_info': {},
+                'memory_info': {},
+                'network_info': {},
+                'firmware_info': {},
+                'validation': {
+                  'has_system_info': false,
+                  'has_processor_info': false,
+                  'has_memory_info': false,
+                  'has_network_info': false,
+                  'has_firmware_info': false,
+                  'power_on': false,
+                  'status': 'fail'
+                }
+              }
+            }) -%}
+          {%- endfor -%}
+          {{ current_results }}
+      when: missing_hardware_hosts | length > 0
+      run_once: true
+
+    # Validation and reporting
+    - name: Calculate hardware enumeration statistics
+      ansible.builtin.set_fact:
+        ipmi_success_count: >-
+          {{ ipmi_results | dict2items | 
+             selectattr('value.validation.status', 'equalto', 'pass') | 
+             list | length }}
+        ipmi_warning_count: >-
+          {{ ipmi_results | dict2items | 
+             selectattr('value.validation.status', 'equalto', 'warn') | 
+             list | length }}
+        ipmi_failure_count: >-
+          {{ ipmi_results | dict2items | 
+             selectattr('value.validation.status', 'equalto', 'fail') | 
+             list | length }}
+        total_processors: >-
+          {{ ipmi_results | dict2items | 
+             map(attribute='value.processor_info.count') | 
+             select('number') | 
+             sum }}
+        total_memory_gb: >-
+          {{ ipmi_results | dict2items | 
+             map(attribute='value.memory_info.total_gb') | 
+             select('number') | 
+             sum }}
+        total_network_adapters: >-
+          {{ ipmi_results | dict2items | 
+             map(attribute='value.network_info.adapter_count') | 
+             select('number') | 
+             sum }}
+      run_once: true
+
+    - name: Display hardware enumeration summary
+      ansible.builtin.debug:
+        msg:
+          - "Hardware Enumeration Summary:"
+          - "Total hosts: {{ ipmi_results.keys() | list | length }}"
+          - "Passed: {{ ipmi_success_count }}"
+          - "Warnings: {{ ipmi_warning_count }}"
+          - "Failed: {{ ipmi_failure_count }}"
+          - "Total processors found: {{ total_processors }}"
+          - "Total memory (GB): {{ total_memory_gb }}"
+          - "Total network adapters: {{ total_network_adapters }}"
+      run_once: true
+
+    - name: Display detailed hardware information
+      ansible.builtin.debug:
+        msg: 
+          - "Host: {{ item.key }}"
+          - "Manufacturer: {{ item.value.system_info.manufacturer | default('Unknown') }}"
+          - "Model: {{ item.value.system_info.model | default('Unknown') }}"
+          - "Processors: {{ item.value.processor_info.count | default(0) }} x {{ item.value.processor_info.model | default('Unknown') }}"
+          - "Memory: {{ item.value.memory_info.total_gb | default(0) }} GB ({{ item.value.memory_info.module_count | default(0) }} modules)"
+          - "Network adapters: {{ item.value.network_info.adapter_count | default(0) }}"
+          - "Power state: {{ item.value.system_info.power_state | default('Unknown') }}"
+          - "Status: {{ item.value.validation.status }}"
+      loop: "{{ ipmi_results | dict2items }}"
+      when: item.value.validation.status == 'pass'
+
+    - name: Display hosts with hardware enumeration issues
+      ansible.builtin.debug:
+        msg: 
+          - "Host: {{ item.key }}"
+          - "Status: {{ item.value.validation.status }}"
+          - "Issue: {{ item.value.error | default('Hardware enumeration incomplete - check details') }}"
+          - "System info available: {{ item.value.validation.has_system_info }}"
+          - "Processor info available: {{ item.value.validation.has_processor_info }}"
+          - "Memory info available: {{ item.value.validation.has_memory_info }}"
+      loop: "{{ ipmi_results | dict2items }}"
+      when: item.value.validation.status in ['warn', 'fail']
+
+    # Generate compatibility report for OpenShift
+    - name: Assess OpenShift compatibility based on hardware specs
+      ansible.builtin.set_fact:
+        openshift_compatibility: >-
+          {%- set compat_results = {} -%}
+          {%- for host_name, hw_data in ipmi_results.items() -%}
+            {%- if hw_data.validation.status == 'pass' -%}
+              {%- set proc_count = hw_data.processor_info.count | default(0) -%}
+              {%- set memory_gb = hw_data.memory_info.total_gb | default(0) -%}
+              {%- set network_count = hw_data.network_info.adapter_count | default(0) -%}
+              {%- set _ = compat_results.update({
+                host_name: {
+                  'meets_minimum_cpu': proc_count >= 4,
+                  'meets_minimum_memory': memory_gb >= 32,
+                  'has_redundant_network': network_count >= 2,
+                  'overall_compatible': (proc_count >= 4 and memory_gb >= 32 and network_count >= 2),
+                  'recommendations': []
+                }
+              }) -%}
+              {%- if proc_count < 4 -%}
+                {%- set _ = compat_results[host_name].recommendations.append('Minimum 4 CPU cores recommended for OpenShift') -%}
+              {%- endif -%}
+              {%- if memory_gb < 32 -%}
+                {%- set _ = compat_results[host_name].recommendations.append('Minimum 32GB RAM recommended for OpenShift') -%}
+              {%- endif -%}
+              {%- if network_count < 2 -%}
+                {%- set _ = compat_results[host_name].recommendations.append('Multiple network adapters recommended for redundancy') -%}
+              {%- endif -%}
+            {%- else -%}
+              {%- set _ = compat_results.update({
+                host_name: {
+                  'meets_minimum_cpu': false,
+                  'meets_minimum_memory': false,
+                  'has_redundant_network': false,
+                  'overall_compatible': false,
+                  'recommendations': ['Hardware enumeration failed - cannot assess compatibility']
+                }
+              }) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ compat_results }}
+      run_once: true
+
+    - name: Display OpenShift compatibility assessment
+      ansible.builtin.debug:
+        msg:
+          - "OpenShift Compatibility Assessment:"
+          - "Compatible hosts: {{ openshift_compatibility | dict2items | selectattr('value.overall_compatible', 'equalto', true) | list | length }}"
+          - "Incompatible hosts: {{ openshift_compatibility | dict2items | selectattr('value.overall_compatible', 'equalto', false) | list | length }}"
+      run_once: true
+
+    - name: Register enumeration end
+      ansible.builtin.set_fact:
+        ipmi_enum_end: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+      run_once: true
+
+    - name: Store hardware enumeration results
+      ansible.builtin.set_fact:
+        validation_results: >-
+          {{ (validation_results | default({}) if validation_results is mapping else {}) | combine({
+            'ipmi_enumeration': {
+              'start_time': ipmi_enum_start,
+              'end_time': ipmi_enum_end,
+              'results': ipmi_results,
+              'openshift_compatibility': openshift_compatibility,
+              'summary': {
+                'total_hosts': ipmi_results.keys() | list | length,
+                'passed': ipmi_success_count | int,
+                'warnings': ipmi_warning_count | int,
+                'failed': ipmi_failure_count | int,
+                'total_processors': total_processors | int,
+                'total_memory_gb': total_memory_gb | int,
+                'total_network_adapters': total_network_adapters | int,
+                'openshift_compatible_hosts': openshift_compatibility | dict2items | selectattr('value.overall_compatible', 'equalto', true) | list | length
+              }
+            }
+          }) }}
+      run_once: true
+
+    # Update check counters for final report
+    - name: Update check counters
+      ansible.builtin.set_fact:
+        total_checks: "{{ total_checks | int + (ipmi_results.keys() | list | length) }}"
+        passed_checks: "{{ passed_checks | int + (ipmi_success_count | int) }}"
+        failed_checks: "{{ failed_checks | int + (ipmi_failure_count | int) }}"
+        warning_checks: "{{ warning_checks | int + (ipmi_warning_count | int) }}"
+      run_once: true
