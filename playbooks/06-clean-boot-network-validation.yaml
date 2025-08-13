@@ -14,8 +14,8 @@
       retry_count: 3
       retry_delay: 5
       circuit_threshold: 5
-    clean_boot_orchestrator: "{{ playbook_dir }}/../scripts/clean_boot_lacp_orchestrator.py"
-    integration_script: "{{ playbook_dir }}/../scripts/run_clean_boot_lacp.sh"
+    clean_boot_orchestrator: "/opt/garden-tiller/scripts/clean_boot_lacp_orchestrator.py"
+    integration_script: "/opt/garden-tiller/scripts/run_clean_boot_lacp.sh"
     results_output_dir: "{{ playbook_dir }}/../reports"
     clean_boot_mode: true
     test_all_permutations: true
@@ -52,25 +52,7 @@
             msg: "No baremetal hosts found in inventory"
           when: groups['baremetal'] | default([]) | length == 0
 
-        - name: Check if clean boot orchestrator exists
-          ansible.builtin.stat:
-            path: "{{ clean_boot_orchestrator }}"
-          register: orchestrator_stat
-
-        - name: Fail if orchestrator not found
-          ansible.builtin.fail:
-            msg: "Clean boot orchestrator not found at {{ clean_boot_orchestrator }}"
-          when: not orchestrator_stat.stat.exists
-
-        - name: Check if integration script exists
-          ansible.builtin.stat:
-            path: "{{ integration_script }}"
-          register: integration_stat
-
-        - name: Fail if integration script not found
-          ansible.builtin.fail:
-            msg: "Integration script not found at {{ integration_script }}"
-          when: not integration_stat.stat.exists
+        
 
         - name: Ensure results output directory exists
           ansible.builtin.file:
