@@ -1,3 +1,6 @@
 [submodule "external/garden-shed"]
 	path = external/garden-shed
 	url = https://github.com/thinko/garden-shed.git
+[submodule "external/garden-irrigation"]
+	path = external/garden-irrigation
+	url = https://github.com/thinko/garden-irrigation.git

@@ -1,0 +1,5 @@
+ansible-core>=2.14,<3.0
+ansible-lint>=6.10
+yamllint>=1.26
+pre-commit>=3.4
+flake8>=5.0
