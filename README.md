@@ -33,7 +33,7 @@ Garden-Tiller uses Ansible, Python, and Shell scripts to validate:
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/thinko/garden-tiller.git
+   git clone --recursive https://github.com/thinko/garden-tiller.git
    cd garden-tiller
    ```
 
