@@ -18,7 +18,7 @@
       retry_count: 3
       retry_delay: 5
       circuit_threshold: 5
-    lacp_test_script: "{{ playbook_dir }}/../scripts/lacp_validation_test.py"
+    lacp_test_script: "/opt/garden-tiller/scripts/lacp_validation_test.py"
     results_output_dir: "{{ playbook_dir }}/../reports"
     clean_boot_mode: true
     test_all_permutations: true
@@ -53,15 +53,7 @@
             msg: "No baremetal hosts found in inventory"
           when: groups['baremetal'] | default([]) | length == 0
 
-        - name: Check if LACP test script exists
-          ansible.builtin.stat:
-            path: "{{ lacp_test_script }}"
-          register: script_stat
-
-        - name: Fail if LACP test script not found
-          ansible.builtin.fail:
-            msg: "LACP test script not found at {{ lacp_test_script }}"
-          when: not script_stat.stat.exists
+        
 
         - name: Ensure results output directory exists
           ansible.builtin.file:
