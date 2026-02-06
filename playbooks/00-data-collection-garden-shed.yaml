@@ -74,7 +74,7 @@
 
         - name: Process Garden Shed collection results
           ansible.builtin.set_fact:
-            garden_shed_data: >-
+            _garden_shed_data_json: >-
               {%- set processed_data = {} -%}
               {%- set summary = {
                 'total_hosts': groups['baremetal'] | length,
@@ -133,8 +133,8 @@
                   }) -%}
                 {%- endif -%}
               {%- endfor -%}
-              {{ processed_data }}
-            data_collection_summary: >-
+              {{ processed_data | to_json }}
+            _data_collection_summary_json: >-
               {%- set summary = {
                 'total_hosts': groups['baremetal'] | length,
                 'successful_collections': 0,
@@ -165,7 +165,12 @@
                   }) -%}
                 {%- endif -%}
               {%- endfor -%}
-              {{ summary }}
+              {{ summary | to_json }}
+
+        - name: Parse Garden Shed collection results
+          ansible.builtin.set_fact:
+            garden_shed_data: "{{ _garden_shed_data_json | from_json }}"
+            data_collection_summary: "{{ _data_collection_summary_json | from_json }}"
 
       rescue:
         - name: Handle complete data collection failure
@@ -300,7 +305,7 @@
     - name: Store centralized data collection results
       ansible.builtin.set_fact:
         validation_results: >-
-          {{ (validation_results | default({}) if validation_results is mapping else {}) | combine({
+          {{ (validation_results | default({}) if (validation_results is defined and validation_results is mapping) else {}) | combine({
             'garden_shed_data_collection': {
               'start_time': data_collection_start,
               'end_time': data_collection_end,

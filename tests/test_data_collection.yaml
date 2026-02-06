@@ -1,0 +1,47 @@
+---
+- name: Setup Test Inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Add mock host
+      ansible.builtin.add_host:
+        name: mock-host-1
+        groups: baremetal
+        bmc_address: 1.2.3.4
+        bmc_username: user
+        bmc_password: password
+        bmc_type: ilo
+
+- import_playbook: ../playbooks/00-data-collection-garden-shed.yaml
+  vars:
+    # Use the mock wrapper script in the tests directory
+    # Note: When imported, playbook_dir refers to the imported playbook's directory (playbooks/)
+    garden_shed_wrapper: "{{ playbook_dir }}/../tests/mock_garden_shed_wrapper.py"
+
+- name: Verify Results
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Verify garden_shed_data is a dictionary
+      ansible.builtin.assert:
+        that:
+          - garden_shed_data is mapping
+        fail_msg: "garden_shed_data should be a dictionary"
+
+    - name: Verify mock host data collection success
+      ansible.builtin.assert:
+        that:
+          - garden_shed_data['mock-host-1'].collection_status == 'success'
+          - garden_shed_data['mock-host-1'].system_info.NetworkAdapters | length > 0
+          - garden_shed_data['mock-host-1'].system_info.NetworkAdapters[0].PhysicalPorts[0].MacAddress == 'AA:BB:CC:DD:EE:FF'
+        fail_msg: "Mock host data was not collected correctly or structure is invalid"
+
+    - name: Verify MAC address table creation
+      ansible.builtin.assert:
+        that:
+          - mac_address_data is mapping
+          - mac_address_data['mock-host-1'] | length > 0
+          - mac_address_data['mock-host-1'][0].mac_address == 'AA:BB:CC:DD:EE:FF'
+        fail_msg: "MAC address lookup table was not created correctly"
