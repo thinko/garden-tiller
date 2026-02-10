@@ -1,4 +1,4 @@
-skip_list:
+skip_list: []
   # add rule IDs to skip after first run if they're false positives
 verbosity: 0
 exclude_paths:
