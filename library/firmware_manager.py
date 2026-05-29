@@ -362,34 +362,47 @@ class FirmwareManager:
                         url=component.firmware_url)
         
         # Create temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.bin') as tmp_file:
-            tmp_path = Path(tmp_file.name)
+        def _create_tmp():
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.bin') as tmp_file:
+                return Path(tmp_file.name)
         
-        # Download firmware (simplified implementation)
-        # Production code should include progress tracking, resume capability, etc.
-        response = requests.get(component.firmware_url, stream=True)
-        response.raise_for_status()
+        tmp_path = await asyncio.to_thread(_create_tmp)
         
-        with open(tmp_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+        def _do_download():
+            # Download firmware (simplified implementation)
+            # Production code should include progress tracking, resume capability, etc.
+            response = requests.get(component.firmware_url, stream=True)
+            response.raise_for_status()
+
+            with open(tmp_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
         
-        # Verify checksum if provided
-        if component.checksum:
-            calculated_checksum = self._calculate_checksum(tmp_path)
-            if calculated_checksum != component.checksum:
-                tmp_path.unlink()
-                raise FirmwareManagerError("Firmware checksum verification failed")
+        try:
+            await asyncio.to_thread(_do_download)
+
+            # Verify checksum if provided
+            if component.checksum:
+                calculated_checksum = await self._calculate_checksum(tmp_path)
+                if calculated_checksum != component.checksum:
+                    raise FirmwareManagerError("Firmware checksum verification failed")
+        except Exception:
+            if tmp_path.exists():
+                await asyncio.to_thread(tmp_path.unlink)
+            raise
         
         return tmp_path
     
-    def _calculate_checksum(self, file_path: Path) -> str:
+    async def _calculate_checksum(self, file_path: Path) -> str:
         """Calculate SHA256 checksum of a file."""
-        sha256_hash = hashlib.sha256()
-        with open(file_path, "rb") as f:
-            for chunk in iter(lambda: f.read(4096), b""):
-                sha256_hash.update(chunk)
-        return sha256_hash.hexdigest()
+        def _calculate():
+            sha256_hash = hashlib.sha256()
+            with open(file_path, "rb") as f:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    sha256_hash.update(chunk)
+            return sha256_hash.hexdigest()
+
+        return await asyncio.to_thread(_calculate)
     
     async def _update_dell_firmware(self, component: FirmwareComponent, 
                                   firmware_path: Path, bmc_connection: Dict[str, Any]) -> bool:
